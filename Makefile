@@ -12,7 +12,7 @@
 
 .PHONY: help venv install smoke qdrant qdrant-check dev build \
         test test-all test-cov lint type-check format \
-        api ingest research monitor evals logs clean clean-images
+        api ingest research monitor evals evals-build evals-check logs clean clean-images
 
 # ── Defaults ────────────────────────────────────
 PYTHON  ?= .venv/bin/python
@@ -43,7 +43,8 @@ help:
 	@echo "  ingest           EDGAR filings -> Qdrant"
 	@echo "  research         One-shot research query"
 	@echo "  monitor          One monitoring cycle"
-	@echo "  evals            Run both eval suites"
+	@echo "  evals            Eval suite A  (make evals V=strict-src for a variant)"
+	@echo "  evals-check      Verify the committed golden dataset is current"
 	@echo ""
 	@echo "  logs             Follow container logs"
 	@echo "  clean            Stop containers and remove volumes (GUARDED)"
@@ -129,8 +130,20 @@ research:
 monitor:
 	./run_monitor.sh --once
 
+# An eval run is the largest quota spike in this project; run_evals.sh prints
+# an estimate and waits for confirmation before spending anything.
+#   make evals                    baseline over all 40 examples
+#   make evals V=strict-src       one named single-variable experiment
 evals:
-	./run_evals.sh
+	./run_evals.sh research $(if $(V),--variant $(V))
+
+# Rebuild the golden dataset from XBRL. Only needed when the spec changes —
+# filed figures are immutable, so the committed values never go stale.
+evals-build:
+	./run_evals.sh build
+
+evals-check:
+	./run_evals.sh check
 
 # ── Container utilities ─────────────────────────
 logs:
