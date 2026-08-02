@@ -89,21 +89,36 @@ BGE_QUERY_PREFIX: str = "Represent this sentence for searching relevant passages
 DEFAULT_SEARCH_LIMIT: int = 8
 
 # ── Dedup thresholds ────────────────────────────────────
-# ⚠️  These are PRIORS, not tuned values. Calibrate in Phase 7 via
-#     evals/sweep_thresholds.py against ~60 hand-labelled pairs.
+# ⚠️  MEASURED PRIORS, not final tuned values. Calibrate properly in Phase 7
+#     via evals/sweep_thresholds.py against ~60 hand-labelled REAL pairs.
 #
-#     The trap: with bge-small, two RANDOM UNRELATED financial sentences score
-#     0.65-0.78 cosine. The 0.7 threshold every tutorial uses would suppress
-#     everything. Thresholds are a property of the embedding model.
+# Measured 2026-08-02 on BAAI/bge-small-en-v1.5, over hand-written canonical
+# alert text in the exact format dedup.py produces:
 #
-#     Pick TAU_HIGH at the LOWEST value where suppression precision >= 0.97 —
-#     not max F1. The cost is asymmetric: a false suppress is a missed real
-#     event; a false fire is mild annoyance.
+#     band                          min     mean    max
+#     DUPLICATE (same event)        0.895   0.914   0.929
+#     RELATED   (event + new info)  0.801   0.844   0.887
+#     DISTINCT  (different event)   0.728   0.735   0.742
 #
-#     RE-TUNE FROM SCRATCH if EMBEDDING_MODEL changes. The numbers are
-#     meaningless against different vectors.
-TAU_HIGH: float = 0.92  # >= this  -> SUPPRESS as duplicate
-TAU_LOW: float = 0.82  # in [LOW, HIGH) -> MERGE as same event, new information
+# THE TRAP, and why these numbers are not the tutorial ones:
+#   The negatives that matter are NOT random sentences. The Qdrant payload
+#   filter already constrains candidates to the same ticker AND alert type,
+#   so the hard case is two genuinely different events sharing both — and
+#   those still score ~0.73. A 0.7 threshold would suppress real events.
+#
+# Chosen to sit between the observed bands, biased for SUPPRESSION PRECISION
+# rather than max F1, because the cost is asymmetric: a false suppress is a
+# missed real event, a false fire is mild annoyance.
+#   TAU_HIGH  above the RELATED ceiling (0.887), below the DUPLICATE floor (0.895)
+#   TAU_LOW   above the DISTINCT ceiling (0.742), below the RELATED floor (0.801)
+#
+# Note this corrects an earlier guess of 0.92/0.82: at 0.92, real duplicates
+# measured at 0.895 and 0.918 would have slipped through and fired twice.
+#
+# RE-TUNE FROM SCRATCH if EMBEDDING_MODEL changes — these numbers are
+# meaningless against different vectors.
+TAU_HIGH: float = 0.89  # >= this  -> SUPPRESS as duplicate
+TAU_LOW: float = 0.78  # in [LOW, HIGH) -> MERGE as same event, new information
 
 # Never suppress a HIGH-severity alert below this similarity, whatever the
 # thresholds say. Missing a real HIGH event costs far more than a duplicate ping.
