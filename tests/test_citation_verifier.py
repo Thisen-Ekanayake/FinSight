@@ -8,12 +8,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.core.schemas import AgentFinding, Citation
 from src.research.citation_verifier import (
     Evidence,
     build_evidence_index,
     extract_numeric_claims,
+    extract_qualitative_claims,
     find_support,
+    judge_qualitative_claims,
     validate_source_markers,
     verify,
 )
@@ -307,3 +311,136 @@ class TestVerify:
         report = verify("Revenue was $416.2B [SRC:EDGAR:1111111111-11-111111]", findings, [_citation()])
         assert report["citation_coverage"] == 1.0
         assert not report["passed"]
+
+
+class TestQualitativeExtraction:
+    """
+    Stage 2's input: sentences that point at a source but carry no number, so
+    stage 1 has nothing to compare.
+    """
+
+    def test_a_cited_narrative_sentence_is_a_qualitative_claim(self):
+        answer = "Management flagged supplier concentration as a risk [SRC:EDGAR:0000320193-25-000079]."
+        assert len(extract_qualitative_claims(answer)) == 1
+
+    def test_a_numeric_sentence_is_left_to_stage_one(self):
+        answer = "Revenue was $416.2B [SRC:EDGAR:0000320193-25-000079]."
+        assert extract_qualitative_claims(answer) == []
+
+    def test_an_uncited_sentence_is_not_audited(self):
+        # Framing and summary carry no marker; the prompt only mandates them
+        # on claims. Auditing them would flag the answer's own structure.
+        assert extract_qualitative_claims("Three themes stand out.") == []
+
+    def test_the_cited_source_ids_are_captured(self):
+        answer = "Management cited tariffs [SRC:EDGAR:0000320193-25-000079]."
+        assert extract_qualitative_claims(answer)[0].source_ids == [("EDGAR", "0000320193-25-000079")]
+
+    def test_sentences_split_without_breaking_figures(self):
+        # REGRESSION GUARD. A naive split on "." would cut "$416.2B." in two
+        # and turn one numeric sentence into a numberless "B." fragment.
+        answer = "Revenue was $416.2B. Management flagged tariffs [SRC:EDGAR:0000320193-25-000079]."
+        claims = extract_qualitative_claims(answer)
+        assert len(claims) == 1
+        assert claims[0].text.startswith("Management")
+
+
+class TestQualitativeJudging:
+    def test_mock_response_bypasses_the_llm(self):
+        claims = extract_qualitative_claims("Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].")
+        assert judge_qualitative_claims(claims, [], [], _mock_response=[(False, "off topic")]) == [(False, "off topic")]
+
+    def test_no_claims_means_no_call(self):
+        assert judge_qualitative_claims([], [], []) == []
+
+    def test_an_unsupported_verdict_becomes_an_unsupported_claim(self):
+        import src.research.citation_verifier as verifier
+
+        original = verifier.judge_qualitative_claims
+        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "the excerpt is about pricing, not tariffs")]
+        try:
+            report = verify(
+                "Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].",
+                [],
+                [_citation()],
+                use_llm=True,
+            )
+        finally:
+            verifier.judge_qualitative_claims = original
+
+        assert not report["passed"]
+        assert report["unsupported_claims"][0]["reason"].startswith("the excerpt")
+
+    def test_coverage_stays_a_stage_one_metric(self):
+        """
+        Coverage must mean the same thing whether or not stage 2 ran, or it
+        cannot be compared across eval experiments.
+        """
+        import src.research.citation_verifier as verifier
+
+        answer = "Revenue was $416.2B [SRC:EDGAR:0000320193-25-000079]. Management flagged tariffs [SRC:EDGAR:0000320193-25-000079]."  # noqa: E501
+        findings = [_finding("AAPL revenue", metric="revenue@2025 FY", value=416161000000.0)]
+
+        original = verifier.judge_qualitative_claims
+        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
+        try:
+            with_llm = verify(answer, findings, [_citation()], use_llm=True)
+        finally:
+            verifier.judge_qualitative_claims = original
+
+        without_llm = verify(answer, findings, [_citation()], use_llm=False)
+        assert with_llm["citation_coverage"] == without_llm["citation_coverage"] == 1.0
+        assert without_llm["passed"] and not with_llm["passed"]
+
+    def test_a_qualitative_failure_is_routed_to_filings_rag(self):
+        import src.research.citation_verifier as verifier
+
+        original = verifier.judge_qualitative_claims
+        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
+        try:
+            report = verify(
+                "Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].",
+                [],
+                [_citation()],
+                selected_agents=["fundamentals", "filings_rag"],
+                use_llm=True,
+            )
+        finally:
+            verifier.judge_qualitative_claims = original
+
+        assert report["unsupported_claims"][0]["origin_agent"] == "filings_rag"
+
+
+@pytest.mark.llm
+class TestLiveQualitativeJudge:
+    """Real Gemini pro tier."""
+
+    def test_an_irrelevant_citation_is_caught(self):
+        claims = extract_qualitative_claims(
+            "Management identified climate change as its principal risk [SRC:EDGAR:0000320193-25-000079]."
+        )
+        findings = [
+            _finding(
+                "AAPL 10-K FY2025 Item 1A (Risk Factors): The Company's business is subject to global "
+                "supply chain concentration in a small number of manufacturing partners located in Asia.",
+                agent="filings_rag",
+                value=None,
+            )
+        ]
+        supported, _ = judge_qualitative_claims(claims, findings, [_citation()])[0]
+        assert not supported
+
+    def test_a_faithful_citation_passes(self):
+        claims = extract_qualitative_claims(
+            "Management flagged supply chain concentration as a risk [SRC:EDGAR:0000320193-25-000079]."
+        )
+        findings = [
+            _finding(
+                "AAPL 10-K FY2025 Item 1A (Risk Factors): The Company's business is subject to global "
+                "supply chain concentration in a small number of manufacturing partners located in Asia.",
+                agent="filings_rag",
+                value=None,
+            )
+        ]
+        supported, _ = judge_qualitative_claims(claims, findings, [_citation()])[0]
+        assert supported

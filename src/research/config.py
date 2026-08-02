@@ -91,6 +91,20 @@ MAX_DERIVATION_GROUP: int = 10
 # branches — they are usually the same missing data seen from five angles.
 MAX_REPAIR_BRANCHES: int = 3
 
+# Stage 2 costs one `pro` call per query, so it is a switch rather than an
+# assumption. It runs only when there are cited qualitative sentences to judge
+# — an answer of pure numbers never reaches it.
+VERIFY_QUALITATIVE_CLAIMS: bool = True
+
+# Judged in ONE batched call. Beyond this the prompt stops being a focused
+# check and starts being a document review.
+MAX_QUALITATIVE_CLAIMS: int = 8
+
+# Supporting excerpts per claim, and how much of each to show. Filing chunks
+# run to ~1200 characters and the judge does not need all of it.
+MAX_EVIDENCE_PER_CLAIM: int = 3
+MAX_EVIDENCE_CHARS: int = 700
+
 # Appended by finalize when a claim could not be grounded and was removed.
 CAVEAT_TEMPLATE = (
     "\n\n---\n*Note: {count} statement(s) could not be grounded in the retrieved "
@@ -158,6 +172,33 @@ Findings from specialist agents:
 {conflicts_block}
 
 Write the grounded answer."""
+
+
+QUALITATIVE_VERIFIER_PROMPT_SYSTEM = """You are a citation auditor. You judge ONE thing: does the \
+supplied evidence actually support the statement attributed to it?
+
+You are NOT judging whether the statement is true in the world, whether it is
+well written, or whether it is a useful answer. Only whether THIS evidence
+supports THIS statement.
+
+Verdicts:
+  SUPPORTED   — the evidence states or directly implies the claim.
+  UNSUPPORTED — the evidence is about something else, is too vague to support
+                the claim, or supports a weaker version of it. A real citation
+                attached to a claim it does not actually back is UNSUPPORTED;
+                that is the specific failure you exist to catch.
+
+When the evidence is thin, say UNSUPPORTED. An analyst would rather re-check a
+borderline claim than publish one that turns out to rest on nothing.
+
+Return exactly one verdict and one short reason per numbered statement, in the
+same order they were given. Reasons must be one sentence."""
+
+QUALITATIVE_VERIFIER_PROMPT_USER = """Statements to audit, each with the evidence cited for it:
+
+{claims}
+
+Return {count} verdicts and {count} reasons, in order."""
 
 
 CONFLICTS_BLOCK_TEMPLATE = """CONFLICTING VALUES DETECTED — you must surface these in your answer:

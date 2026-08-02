@@ -49,8 +49,11 @@ from src.core.schemas import AgentFinding, Citation
 from src.research.config import (
     IGNORE_BARE_INTEGERS_BELOW,
     MAX_DERIVATION_GROUP,
+    MAX_EVIDENCE_CHARS,
+    MAX_EVIDENCE_PER_CLAIM,
     NUMERIC_REL_TOLERANCE,
     PERCENT_ABS_TOLERANCE,
+    VERIFY_QUALITATIVE_CLAIMS,
 )
 from src.research.state import ResearchState, UnsupportedClaim, VerificationReport
 
@@ -470,6 +473,175 @@ def _sentence_around(text: str, position: int) -> str:
     return text[start:end].strip()
 
 
+# ── Stage 2: qualitative claims ─────────────────────────
+# Sentence boundary: a terminator followed by whitespace and something that
+# starts a new sentence. The lookahead is what keeps "$416.2B." and "Item 1A."
+# from splitting mid-figure.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z(\"'])|\n+")
+
+
+@dataclass
+class QualitativeClaim:
+    """
+    A cited sentence with nothing numeric in it.
+
+    This is the shape stage 1 structurally cannot judge: there is no value to
+    compare, only an assertion pointing at a source. It is also where the
+    interesting failure lives — a real citation attached to a claim it does
+    not actually support.
+    """
+
+    text: str
+    source_ids: list[tuple[str, str]]
+
+
+def extract_qualitative_claims(answer: str) -> list[QualitativeClaim]:
+    """
+    Find sentences that cite a source but assert nothing numeric.
+
+    A sentence with no marker at all is not audited: the synthesis prompt
+    requires markers on numeric claims, so an uncited sentence is framing or
+    summary rather than a sourced assertion.
+
+    Parameters
+    ----------
+    answer : str
+        The drafted answer.
+
+    Returns
+    -------
+    list of QualitativeClaim
+    """
+    claims: list[QualitativeClaim] = []
+
+    for sentence in _SENTENCE_SPLIT_RE.split(answer):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+
+        markers = MARKER_RE.findall(sentence)
+        if not markers or extract_numeric_claims(sentence):
+            continue
+
+        claims.append(QualitativeClaim(text=sentence, source_ids=[(t, i) for t, i in markers]))
+
+    return claims
+
+
+def _evidence_text(claim: QualitativeClaim, findings: list[AgentFinding], citations: list[Citation]) -> str:
+    """
+    Gather what the cited sources actually said, for the judge to read.
+
+    Pulls the retrieved excerpt from each cited citation and the claim text of
+    any finding carrying that citation — the specialist's own rendering of
+    what the tool returned.
+    """
+    wanted = set(claim.source_ids)
+    parts: list[str] = []
+
+    for citation in citations:
+        if (citation["source_type"], citation["source_id"]) in wanted and citation.get("excerpt"):
+            parts.append(str(citation["excerpt"]))
+
+    for finding in findings:
+        if any((c["source_type"], c["source_id"]) in wanted for c in finding["citations"]):
+            parts.append(finding["claim"])
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.add(part)
+            unique.append(part)
+
+    if not unique:
+        return "(no supporting text was retrieved for this source)"
+
+    return "\n".join(f"  - {p[:MAX_EVIDENCE_CHARS]}" for p in unique[:MAX_EVIDENCE_PER_CLAIM])
+
+
+def judge_qualitative_claims(
+    claims: list[QualitativeClaim],
+    findings: list[AgentFinding],
+    citations: list[Citation],
+    *,
+    _mock_response: list[tuple[bool, str]] | None = None,
+) -> list[tuple[bool, str]]:
+    """
+    Ask the LLM whether each cited sentence is supported by its evidence.
+
+    ONE batched ``pro`` call for all claims, not one call per claim. The
+    structured-output schema is two parallel ``list[str]`` fields because
+    Gemini's schema handling is strict about nesting and optionality —
+    the same constraint the router works around.
+
+    Parameters
+    ----------
+    claims : list of QualitativeClaim
+        Cited, non-numeric sentences.
+    findings : list of AgentFinding
+        Used to reconstruct what each cited source said.
+    citations : list of Citation
+        Used for retrieved excerpts.
+    _mock_response : list of tuple, optional
+        Bypass the LLM in tests.
+
+    Returns
+    -------
+    list of tuple
+        ``(supported, reason)`` aligned with ``claims``. A claim the model
+        skipped defaults to supported: stage 2 is an additional check, and an
+        incomplete response must not manufacture failures stage 1 never saw.
+    """
+    if _mock_response is not None:
+        return _mock_response
+    if not claims:
+        return []
+
+    from pydantic import BaseModel, Field
+
+    from src.core.llm import get_llm
+    from src.core.tracing import trace_metadata
+    from src.research.config import (
+        MAX_QUALITATIVE_CLAIMS,
+        QUALITATIVE_VERIFIER_PROMPT_SYSTEM,
+        QUALITATIVE_VERIFIER_PROMPT_USER,
+    )
+
+    batch = claims[:MAX_QUALITATIVE_CLAIMS]
+
+    class Verdicts(BaseModel):
+        """Flat and fully required — nested or optional fields fight Gemini's schema."""
+
+        verdicts: list[str] = Field(description="SUPPORTED or UNSUPPORTED, one per statement, in order")
+        reasons: list[str] = Field(description="One short sentence per statement, in order")
+
+    rendered = "\n\n".join(
+        f"{i}. STATEMENT: {claim.text}\n   EVIDENCE:\n{_evidence_text(claim, findings, citations)}"
+        for i, claim in enumerate(batch, start=1)
+    )
+    user = QUALITATIVE_VERIFIER_PROMPT_USER.format(claims=rendered, count=len(batch))
+
+    model = get_llm("pro", temperature=0.0).with_structured_output(Verdicts)
+    result = model.invoke(
+        [("system", QUALITATIVE_VERIFIER_PROMPT_SYSTEM), ("human", user)],
+        config={"metadata": trace_metadata(phase="P4"), "tags": ["subsystem1", "citation_verifier"]},
+    )
+
+    verdicts = list(getattr(result, "verdicts", []))
+    reasons = list(getattr(result, "reasons", []))
+
+    judged: list[tuple[bool, str]] = []
+    for index in range(len(batch)):
+        verdict = verdicts[index].strip().upper() if index < len(verdicts) else "SUPPORTED"
+        reason = reasons[index] if index < len(reasons) else ""
+        judged.append((not verdict.startswith("UNSUPPORTED"), reason))
+
+    # Claims past the batch cap were never looked at, so they are not failures.
+    judged.extend((True, "not audited — beyond the per-query batch cap") for _ in claims[len(batch) :])
+    return judged
+
+
 # ── The verifier ────────────────────────────────────────
 def verify(
     answer: str,
@@ -477,11 +649,14 @@ def verify(
     citations: list[Citation],
     *,
     selected_agents: list[str] | None = None,
+    use_llm: bool = False,
 ) -> VerificationReport:
     """
-    Check an answer's numbers and source markers against tool output.
+    Check an answer's numbers, source markers, and cited assertions.
 
-    Stage 1 only — deterministic, zero API calls.
+    Stage 1 (always) is deterministic and free. Stage 2 (``use_llm``) judges
+    the cited sentences stage 1 structurally cannot: no number to compare, only
+    an assertion pointing at a source.
 
     Parameters
     ----------
@@ -494,6 +669,9 @@ def verify(
     selected_agents : list of str, optional
         The router's plan, used to target repairs at an agent that was
         actually in it.
+    use_llm : bool, default False
+        Run stage 2. Off by default so ``verify`` stays free and reproducible;
+        the graph node turns it on from config.
 
     Returns
     -------
@@ -526,7 +704,26 @@ def verify(
         )
 
     invalid = validate_source_markers(answer, citations)
+    # Coverage stays a stage-1 metric on purpose: it must be comparable across
+    # eval runs, and a number that silently changes meaning when an LLM switch
+    # is flipped is not a metric.
     coverage = len(verified) / len(claims) if claims else 1.0
+
+    if use_llm:
+        qualitative = extract_qualitative_claims(answer)
+        verdicts = judge_qualitative_claims(qualitative, findings, citations)
+        for audited, (supported, reason) in zip(qualitative, verdicts):
+            if supported:
+                verified.append(f"(qualitative) {audited.text[:80]}")
+                continue
+            unsupported.append(
+                UnsupportedClaim(
+                    claim=audited.text,
+                    reason=reason or "the cited source does not support this statement",
+                    origin_agent="filings_rag" if "filings_rag" in agents else _infer_origin(agents),
+                    suggested_requery=f"Find disclosure text that directly addresses: {audited.text}",
+                )
+            )
 
     report = VerificationReport(
         verified_claims=verified,
@@ -558,5 +755,6 @@ def citation_verifier_node(state: ResearchState) -> dict:
         state.get("findings", []),
         state.get("citations", []),
         selected_agents=list(plan.get("selected_agents", [])),
+        use_llm=VERIFY_QUALITATIVE_CLAIMS,
     )
     return {"verification": report}
