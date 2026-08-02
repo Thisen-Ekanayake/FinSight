@@ -13,11 +13,18 @@
 #   contextual_header(chunk)            what gets prepended before embedding
 #
 # ══ NARRATIVE ONLY ══
-#   Item 8 (Financial Statements) is deliberately NOT chunked. Its numbers
-#   come from XBRL companyfacts, which is exact and self-citing. Financial
-#   tables become unreadable soup under HTML text extraction, and that soup is
-#   exactly where hallucinated figures originate. The LLM is never asked to
-#   read a number out of one.
+#   Financial statements are deliberately NOT chunked. Their numbers come from
+#   XBRL companyfacts, which is exact and self-citing. Financial tables become
+#   unreadable soup under HTML text extraction, and that soup is exactly where
+#   hallucinated figures originate. The LLM is never asked to read a number
+#   out of one.
+#
+#   WHICH item that is depends on the FORM:
+#       10-K  Item 8  Financial Statements
+#       10-Q  Item 1  Financial Statements   (Item 1 is "Business" in a 10-K)
+#   So the item map is selected by form type via items_for_form(). Assuming
+#   10-K numbering for a 10-Q ingests precisely the table soup this design
+#   exists to avoid.
 #
 # ══ THE TABLE-OF-CONTENTS TRAP ══
 #   A 10-K contains every "Item N" heading TWICE: once in the table of
@@ -45,6 +52,7 @@ from src.vectorstore.config import (
     CHUNK_SIZE,
     MIN_CHUNK_CHARS,
     NARRATIVE_ITEMS,
+    items_for_form,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,8 +250,10 @@ def chunk_filing(path: Path, filing: FilingRef, *, items: dict[str, str] | None 
     filing : FilingRef
         Metadata for the filing, providing accession number and dates.
     items : dict, optional
-        ``{item_code: section_name}`` to extract. Defaults to NARRATIVE_ITEMS
-        (1, 1A, 3, 7, 7A) — note Item 8 is excluded by design.
+        ``{item_code: section_name}`` to extract. Defaults to the map for the
+        filing's FORM TYPE, which matters: Item 1 is "Business" in a 10-K but
+        "Financial Statements" in a 10-Q, and financial statements must never
+        be chunked.
 
     Returns
     -------
@@ -252,7 +262,7 @@ def chunk_filing(path: Path, filing: FilingRef, *, items: dict[str, str] | None 
         which is logged rather than raised: a filing that fails to parse
         should be skipped, never ingested as garbage.
     """
-    wanted = items if items is not None else NARRATIVE_ITEMS
+    wanted = items if items is not None else items_for_form(filing["form_type"])
 
     text = extract_text(path)
     if not text:

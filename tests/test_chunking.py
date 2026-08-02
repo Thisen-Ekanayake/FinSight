@@ -39,6 +39,11 @@ def _body(item: str, words: int = 400) -> str:
     return " ".join(f"{item}-content-{i}" for i in range(words))
 
 
+def _quarterly(**overrides) -> FilingRef:
+    """A 10-Q FilingRef, where Item numbering differs from a 10-K."""
+    return FilingRef(**{**FILING, "form_type": "10-Q", **overrides})  # type: ignore[typeddict-item]
+
+
 def _make_html(*, with_toc: bool = True, with_part_iii_cluster: bool = True) -> str:
     """Build a 10-K-shaped document with the structures that trip naive parsers."""
     parts = ["<html><body>"]
@@ -217,6 +222,79 @@ class TestChunkFiling:
     def test_explicit_item_selection_is_honoured(self, filing_path):
         chunks = chunk_filing(filing_path, FILING, items={"1A": "Risk Factors"})
         assert {c["item_section"] for c in chunks} == {"1A"}
+
+
+class TestFormSpecificItemNumbering:
+    """
+    REGRESSION GUARD for a real bug.
+
+    "Item N" means different things per form. In a 10-Q, Item 1 is FINANCIAL
+    STATEMENTS, not Business. Applying the 10-K map to a 10-Q ingested 589
+    chunks of raw table soup — exactly what this design exists to prevent.
+    """
+
+    def _quarterly_html(self) -> str:
+        return "\n".join(
+            [
+                "<html><body>",
+                "<p>Item 1. Financial Statements</p>",
+                f"<p>$ ( 13 ) Investments Balance beginning of period $ ( 1,051 ) {_body('fin', 500)}</p>",
+                "<p>Item 2. Management's Discussion and Analysis</p>",
+                f"<p>{_body('mdna')}</p>",
+                "<p>Item 3. Quantitative and Qualitative Disclosures About Market Risk</p>",
+                f"<p>{_body('risk')}</p>",
+                "<p>Item 1A. Risk Factors</p>",
+                f"<p>{_body('rf')}</p>",
+                "</body></html>",
+            ]
+        )
+
+    @pytest.fixture
+    def quarterly_path(self, tmp_path: Path) -> Path:
+        path = tmp_path / "test-10q.htm"
+        path.write_text(self._quarterly_html())
+        return path
+
+    def test_10q_item_1_financial_statements_is_excluded(self, quarterly_path):
+        chunks = chunk_filing(quarterly_path, _quarterly())
+        assert "1" not in {c["item_section"] for c in chunks}, "10-Q Item 1 is Financial Statements — never chunk it"
+
+    def test_10q_captures_mdna_as_item_2(self, quarterly_path):
+        chunks = chunk_filing(quarterly_path, _quarterly())
+        assert "2" in {c["item_section"] for c in chunks}, "10-Q MD&A is Item 2, not Item 7"
+
+    def test_10q_captures_risk_factors(self, quarterly_path):
+        chunks = chunk_filing(quarterly_path, _quarterly())
+        assert "1A" in {c["item_section"] for c in chunks}
+
+    def test_10q_never_ingests_the_table_soup(self, quarterly_path):
+        chunks = chunk_filing(quarterly_path, _quarterly())
+        assert not any("Investments Balance beginning of period" in c["text"] for c in chunks)
+
+    def test_10k_still_captures_item_1_as_business(self, filing_path):
+        chunks = chunk_filing(filing_path, FILING)
+        assert "1" in {c["item_section"] for c in chunks}, "10-K Item 1 IS Business and should be chunked"
+
+    def test_item_maps_differ_between_forms(self):
+        from src.vectorstore.config import items_for_form
+
+        assert items_for_form("10-K") != items_for_form("10-Q")
+
+    def test_neither_map_includes_its_financial_statements_item(self):
+        from src.vectorstore.config import items_for_form
+
+        assert "8" not in items_for_form("10-K")
+        assert "1" not in items_for_form("10-Q")
+
+    def test_unknown_form_falls_back_to_the_10k_map(self):
+        from src.vectorstore.config import NARRATIVE_ITEMS_10K, items_for_form
+
+        assert items_for_form("S-1") == NARRATIVE_ITEMS_10K
+
+    def test_form_lookup_is_case_insensitive(self):
+        from src.vectorstore.config import items_for_form
+
+        assert items_for_form("10-q") == items_for_form("10-Q")
 
 
 class TestContextualHeader:

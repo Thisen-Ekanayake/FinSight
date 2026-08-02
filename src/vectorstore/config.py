@@ -70,17 +70,72 @@ CHUNK_OVERLAP: int = 200
 CHUNK_SEPARATORS: list[str] = ["\n\n", "\n", ". ", " "]
 MIN_CHUNK_CHARS: int = 200
 
-# Narrative items worth embedding. Item 8 (financial statements) is
-# deliberately absent: its numbers come from XBRL companyfacts, which is exact
-# and self-citing. Asking an LLM to read a figure out of mangled table HTML is
-# precisely where hallucinated numbers come from.
-NARRATIVE_ITEMS: dict[str, str] = {
+# ══ ITEM NUMBERING DIFFERS BY FORM ══
+# The same "Item N" means different things in a 10-K and a 10-Q, so the map of
+# narrative sections MUST be selected by form type. Getting this wrong is not
+# a cosmetic error: in a 10-Q, Item 1 is FINANCIAL STATEMENTS, so treating it
+# as "Business" ingests exactly the mangled table soup this design exists to
+# avoid.
+#
+# In both maps, financial statements are deliberately absent — 10-K Item 8 and
+# 10-Q Item 1. Their numbers come from XBRL companyfacts, which is exact and
+# self-citing.
+NARRATIVE_ITEMS_10K: dict[str, str] = {
     "1": "Business",
     "1A": "Risk Factors",
     "3": "Legal Proceedings",
     "7": "Management's Discussion and Analysis",
     "7A": "Quantitative and Qualitative Disclosures About Market Risk",
 }
+
+# 10-Q layout:
+#   Part I   Item 1  Financial Statements          <- EXCLUDED (XBRL covers it)
+#            Item 2  MD&A                          <- included
+#            Item 3  Market Risk                   <- included
+#            Item 4  Controls and Procedures       <- excluded (boilerplate)
+#   Part II  Item 1  Legal Proceedings
+#            Item 1A Risk Factors                  <- included
+#
+# Note Part I and Part II reuse numbers: "Item 1" is Financial Statements in
+# Part I and Legal Proceedings in Part II, "Item 3" is Market Risk then
+# Defaults. find_item_sections resolves each code to whichever occurrence has
+# the most content, which lands on the substantive Part I sections.
+NARRATIVE_ITEMS_10Q: dict[str, str] = {
+    "1A": "Risk Factors",
+    "2": "Management's Discussion and Analysis",
+    "3": "Quantitative and Qualitative Disclosures About Market Risk",
+}
+
+# Default for callers that do not specify a form. Kept as the 10-K map for
+# backwards compatibility; chunk_filing selects properly via items_for_form.
+NARRATIVE_ITEMS: dict[str, str] = NARRATIVE_ITEMS_10K
+
+NARRATIVE_ITEMS_BY_FORM: dict[str, dict[str, str]] = {
+    "10-K": NARRATIVE_ITEMS_10K,
+    "10-K/A": NARRATIVE_ITEMS_10K,
+    "20-F": NARRATIVE_ITEMS_10K,
+    "10-Q": NARRATIVE_ITEMS_10Q,
+    "10-Q/A": NARRATIVE_ITEMS_10Q,
+}
+
+
+def items_for_form(form_type: str) -> dict[str, str]:
+    """
+    Return the narrative item map for a form type.
+
+    Parameters
+    ----------
+    form_type : str
+        e.g. ``"10-K"``, ``"10-Q"``.
+
+    Returns
+    -------
+    dict
+        ``{item_code: section_name}``. Unknown forms fall back to the 10-K
+        map, which is the more common shape.
+    """
+    return NARRATIVE_ITEMS_BY_FORM.get(form_type.upper(), NARRATIVE_ITEMS_10K)
+
 
 # bge models are ASYMMETRIC: this prefix goes on QUERIES ONLY, never on stored
 # documents. Alert-vs-alert dedup is symmetric and uses no prefix at all.
