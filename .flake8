@@ -1,0 +1,25 @@
+[flake8]
+max-line-length = 120
+max-complexity = 12
+exclude =
+    .venv,
+    .git,
+    __pycache__,
+    build,
+    dist,
+    data,
+    *.egg-info,
+    node_modules,
+    .github
+ignore =
+    # whitespace before ':'
+    E203,
+    # line break before binary operator
+    W503,
+    # line too long (handled by black)
+    E501
+per-file-ignores =
+    __init__.py:F401
+    tests/*:S101
+statistics = true
+count = true

@@ -1,0 +1,61 @@
+# ═══════════════════════════════════════════════
+# FinSight — Project Configuration
+# ═══════════════════════════════════════════════
+# Tool config ONLY. Dependencies live in requirements.txt.
+
+[project]
+name = "finsight"
+version = "0.1.0"
+description = "Multi-agent financial intelligence platform — grounded research + autonomous portfolio surveillance"
+requires-python = ">=3.12"
+
+# ── Black (Code Formatter) ──────────────────────
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+exclude = '''
+/(
+    \.venv
+  | \.git
+  | data
+  | evals/datasets
+)/
+'''
+
+# ── isort (Import Sorter) ───────────────────────
+[tool.isort]
+profile = "black"
+line_length = 120
+known_first_party = ["src", "evals"]
+skip_gitignore = true
+skip_glob = ["data/*", ".venv/*"]
+
+# ── mypy (Type Checker) ─────────────────────────
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    "data/",
+    ".venv/",
+]
+
+# ── pytest ──────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring external services (network, Qdrant, Gemini)",
+    "llm: marks tests that consume Gemini API quota (deselected by default)",
+]
+asyncio_mode = "auto"
+pythonpath = ["."]

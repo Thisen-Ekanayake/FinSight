@@ -1,0 +1,65 @@
+# ══════════════════════════════════════════════════
+# FinSight — Dependencies
+#
+# Pinning policy:
+#   PINNED   = load-bearing. Breaking changes here cost you a day.
+#   unpinned = leaf utilities and dev tooling.
+# Dev tools live in this file too (house convention).
+# ══════════════════════════════════════════════════
+
+# ── Orchestration (PIN ALL — this family moves fast) ──
+langgraph==0.6.7
+langgraph-checkpoint-sqlite==2.0.11
+langchain-core==0.3.78
+langchain-google-genai==2.1.12
+langchain-text-splitters==0.3.11
+langsmith==0.4.33
+
+# ── Vector store & embeddings ─────────────────────
+# qdrant-client must track the pinned server (v1.17.1). fastembed's ONNX model
+# registry moves, and changing the embedding model invalidates every tuned
+# similarity threshold — so both are pinned hard.
+qdrant-client==1.17.1
+fastembed==0.7.3
+
+# ── Financial data ────────────────────────────────
+yfinance                        # UNPINNED ON PURPOSE: unofficial API; upgrading IS the fix when Yahoo breaks it
+fredapi
+finnhub-python
+requests
+requests-cache                  # HTTP-layer caching for SEC/FRED/FMP/Finnhub
+httpx
+beautifulsoup4
+lxml
+feedparser
+
+# ── Analysis ──────────────────────────────────────
+pandas
+numpy
+ta                              # technical indicators; pure-python, avoids the TA-Lib C dependency
+python-dateutil
+
+# ── Persistence / API / scheduling (PIN the web surface) ──
+SQLAlchemy==2.0.43
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pydantic==2.11.9
+pydantic-settings
+APScheduler
+python-dotenv
+
+# ── UI (Phase 8) ──────────────────────────────────
+streamlit
+plotly
+
+# ── Dev ───────────────────────────────────────────
+pytest
+pytest-asyncio
+pytest-cov
+responses                       # HTTP mocking for the data layer
+freezegun                       # time-window dedup tests
+black
+isort
+flake8
+mypy
+types-requests
