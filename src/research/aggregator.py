@@ -38,6 +38,7 @@ from src.research.config import (
     CONFLICT_REL_TOLERANCE,
     CONFLICTS_BLOCK_TEMPLATE,
     NO_FINDINGS_NOTE,
+    SYNTHESIS_MODEL_TIER,
     SYNTHESIS_PROMPT_SYSTEM,
     SYNTHESIS_PROMPT_USER,
 )
@@ -222,7 +223,7 @@ def synthesize(
         conflicts_block=_format_conflicts(conflicts),
     )
 
-    response = get_llm("pro", temperature=0.0).invoke(
+    response = get_llm(SYNTHESIS_MODEL_TIER, temperature=0.0).invoke(  # type: ignore[arg-type]
         [("system", SYNTHESIS_PROMPT_SYSTEM), ("human", user)],
         config={"metadata": trace_metadata(phase="P3"), "tags": ["subsystem1", "synthesizer"]},
     )

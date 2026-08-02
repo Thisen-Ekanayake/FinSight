@@ -35,6 +35,7 @@ from src.core.tracing import trace_metadata
 from src.research.config import (
     AGENT_CAPABILITIES,
     DEFAULT_TICKER_LIMIT,
+    ROUTER_MODEL_TIER,
     ROUTER_PROMPT_SYSTEM,
     ROUTER_PROMPT_USER,
 )
@@ -162,7 +163,7 @@ def plan_query(query: str, *, _mock_response: str | None = None) -> RoutePlan:
     capabilities = "\n".join(f"  - {name}: {desc}" for name, desc in AGENT_CAPABILITIES.items())
     system = ROUTER_PROMPT_SYSTEM.format(capabilities=capabilities, ticker_limit=DEFAULT_TICKER_LIMIT)
 
-    llm = get_llm("flash", temperature=0.0).with_structured_output(RouterOutput)
+    llm = get_llm(ROUTER_MODEL_TIER, temperature=0.0).with_structured_output(RouterOutput)  # type: ignore[arg-type]
     output = llm.invoke(
         [("system", system), ("human", ROUTER_PROMPT_USER.format(query=query))],
         config={"metadata": trace_metadata(phase="P3"), "tags": ["subsystem1", "router"]},

@@ -28,6 +28,17 @@ MAX_REPAIR_ATTEMPTS: int = 1
 # Guard against a cyclic graph running away.
 RECURSION_LIMIT: int = 25
 
+# ── Model tiers ─────────────────────────────────────────
+# Which Gemini tier each LLM step uses. Named constants rather than string
+# literals at the call sites, so "would `pro` route better than `flash`?" is a
+# one-line experiment (evals/variants.py) instead of an edit to three modules.
+#
+# Routing is a short classification over a fixed capability list — `flash` is
+# sufficient and it sits on the critical path of every single query. Synthesis
+# is where the reasoning actually happens, so it gets `pro`.
+ROUTER_MODEL_TIER: str = "flash"
+SYNTHESIS_MODEL_TIER: str = "pro"
+
 # Filing chunks retrieved per filings_rag branch.
 FILINGS_TOP_K: int = 8
 
