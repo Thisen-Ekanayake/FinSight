@@ -9,6 +9,9 @@
 #   python -m src.research.cli "How did Apple's gross margin trend?"
 #   python -m src.research.cli --plan-only "Compare AAPL and MSFT"
 #   python -m src.research.cli --audit "What is the Fed funds rate?"
+#
+# Runs are checkpointed to the same database the API reads, so any query asked
+# here is replayable at GET /research/threads/{thread_id}.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -16,9 +19,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import uuid
 
 from src.core.logging_setup import configure_logging
 from src.core.tracing import configure_tracing
+from src.persistence.checkpointer import sync_checkpointer
+from src.persistence.db import init_db
+from src.persistence.repository import record_research_run
 from src.research.config import RECURSION_LIMIT
 from src.research.graph import build_research_graph
 from src.research.state import RoutePlan, new_state
@@ -105,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan-only", action="store_true", help="show the routing plan without executing")
     parser.add_argument("--audit", action="store_true", help="print the tool-call audit trail")
     parser.add_argument("--quiet", action="store_true", help="suppress per-node progress")
+    parser.add_argument("--thread", default="", help="reuse a checkpoint thread id")
     args = parser.parse_args(argv)
 
     configure_logging(level="WARNING" if args.quiet else None)
@@ -116,45 +124,57 @@ def main(argv: list[str] | None = None) -> int:
         _print_plan(plan_query(args.query))
         return 0
 
-    graph = build_research_graph()
+    thread_id = args.thread or f"research:{uuid.uuid4().hex[:16]}"
     started = time.monotonic()
     final: dict = {}
 
     print(f"\n{RULE}\nQUERY  {args.query}")
 
-    # Two stream modes at once:
-    #   "updates" — each node's PARTIAL state as it completes, which is what
-    #               makes the fan-out visible rather than a black box.
-    #   "values"  — the full merged state after each superstep.
-    #
-    # The final state must come from "values". Merging the "updates" chunks by
-    # hand would overwrite the reducer-backed keys instead of concatenating
-    # them, so the audit trail would show only the last branch's tool calls.
-    for mode, chunk in graph.stream(
-        new_state(args.query),
-        config={"recursion_limit": RECURSION_LIMIT},
-        stream_mode=["updates", "values"],
-    ):
-        if mode == "values":
-            final = chunk
-            continue
+    # Checkpointed even from the CLI, and on the same database the API uses,
+    # so a run started here shows up at GET /research/threads/{thread_id}. One
+    # audit trail, whichever door the query came through.
+    with sync_checkpointer() as saver:
+        graph = build_research_graph(checkpointer=saver)
 
-        for node, update in chunk.items():
-            if node == "router":
-                _print_plan(update["plan"])
-                print(f"\n{RULE}\nBRANCHES")
-            elif node == "citation_verifier":
-                targets = update.get("repair_targets", [])
-                if targets:
-                    print(f"  {'repair':14s} re-querying {', '.join(t['origin_agent'] for t in targets)}")
-            elif node not in ("aggregator", "finalize"):
-                count = len(update.get("findings", []))
-                failed = update.get("errors", [])
-                mark = "FAILED" if failed else f"{count} findings"
-                print(f"  {node:14s} {mark}")
+        # Two stream modes at once:
+        #   "updates" — each node's PARTIAL state as it completes, which is
+        #               what makes the fan-out visible rather than a black box.
+        #   "values"  — the full merged state after each superstep.
+        #
+        # The final state must come from "values". Merging the "updates"
+        # chunks by hand would overwrite the reducer-backed keys instead of
+        # concatenating them, so the audit trail would show only the last
+        # branch's tool calls.
+        for mode, chunk in graph.stream(
+            new_state(args.query, thread_id=thread_id),
+            config={"recursion_limit": RECURSION_LIMIT, "configurable": {"thread_id": thread_id}},
+            stream_mode=["updates", "values"],
+        ):
+            if mode == "values":
+                final = chunk
+                continue
 
+            for node, update in chunk.items():
+                if node == "router":
+                    _print_plan(update["plan"])
+                    print(f"\n{RULE}\nBRANCHES")
+                elif node == "citation_verifier":
+                    targets = update.get("repair_targets", [])
+                    if targets:
+                        print(f"  {'repair':14s} re-querying {', '.join(t['origin_agent'] for t in targets)}")
+                elif node not in ("aggregator", "finalize"):
+                    count = len(update.get("findings", []))
+                    failed = update.get("errors", [])
+                    mark = "FAILED" if failed else f"{count} findings"
+                    print(f"  {node:14s} {mark}")
+
+    elapsed = time.monotonic() - started
     _print_answer(final, show_audit=args.audit)
-    print(f"\n{RULE}\ncompleted in {time.monotonic() - started:.1f}s\n")
+
+    init_db()
+    record_research_run(final, thread_id=thread_id, latency_ms=int(elapsed * 1000))
+
+    print(f"\n{RULE}\ncompleted in {elapsed:.1f}s   thread {thread_id}\n")
     return 0
 
 

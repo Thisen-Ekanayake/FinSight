@@ -4,7 +4,7 @@
 
 Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), and **Google Gemini** (reasoning). All financial data comes from free, official sources.
 
-> Status: **Phase 0 — setup gate.** See [the phase plan](#phases).
+> Status: **Phase 4 complete** — the research subsystem is end-to-end: routed, fanned out, synthesised, **verified**, and served over HTTP with a replayable audit trail. See [the phase plan](#phases).
 
 ---
 
@@ -79,6 +79,30 @@ make smoke                    # one traced Gemini call → LangSmith run URL
 make test                     # unit tests (no network, no LLM spend)
 ```
 
+### Ask it something
+
+```bash
+./run_ingest.sh                                         # filings → Qdrant (once)
+./run_research.sh "How did Apple's gross margin trend over the last three fiscal years?"
+./run_api.sh                                            # then open localhost:8000/docs
+```
+
+Both doors write to the same checkpoint database, so a question asked at the CLI is replayable at `GET /research/threads/{thread_id}`.
+
+```
+STEP  NODES THAT RAN                                    FINDINGS
+   1  router                                                   0
+   2  fundamentals, fundamentals, technical, technical        22   ← 4 branches, one superstep
+   3  aggregator                                              22
+   4  citation_verifier                                       22
+   5  fundamentals                                            28   ← targeted repair: one agent, not four
+   6  aggregator                                              28
+   7  citation_verifier                                       28
+   8  finalize                                                28
+```
+
+That trail is read back from the checkpointer, not written by a logger alongside the run.
+
 ### Gemini backends
 
 `GEMINI_BACKEND` picks how Gemini is reached; `get_llm()` hides the difference from every caller.
@@ -102,11 +126,11 @@ This machine already runs a Qdrant on **:6333** owned by another project. FinSig
 
 | # | Deliverable | Teaches |
 |---|---|---|
-| 0 | Skeleton, isolated Qdrant, traced Gemini call | LangSmith setup |
-| 1 | Data layer: EDGAR, FRED, prices, news — cached, rate-limited, fallback-chained | — (plumbing) |
-| 2 | Qdrant filings RAG: chunking, payload indexes, idempotent ingest | **Qdrant** |
-| 3 | Research graph: router + parallel specialists + aggregator | **LangGraph core** |
-| 4 | Citation verifier, repair loop, checkpointing, REST API | LangGraph checkpoints |
+| 0 | ✅ Skeleton, isolated Qdrant, traced Gemini call | LangSmith setup |
+| 1 | ✅ Data layer: EDGAR, FRED, prices, news — cached, rate-limited, fallback-chained | — (plumbing) |
+| 2 | ✅ Qdrant filings RAG: chunking, payload indexes, idempotent ingest | **Qdrant** |
+| 3 | ✅ Research graph: router + parallel specialists + aggregator | **LangGraph core** |
+| 4 | ✅ Citation verifier, repair loop, checkpointing, REST API | LangGraph checkpoints |
 | 5 | Eval suite A: citation faithfulness, measured iteration | **LangSmith evals** |
 | 6 | Monitoring subsystem + the dedup engine | LangGraph + Qdrant as a data structure |
 | 7 | HITL `interrupt` gate, dispatcher, scheduler, eval suite B | Durable execution |

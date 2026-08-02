@@ -12,7 +12,7 @@
 
 .PHONY: help venv install smoke qdrant qdrant-check dev build \
         test test-all test-cov lint type-check format \
-        ingest research monitor evals logs clean clean-images
+        api ingest research monitor evals logs clean clean-images
 
 # ── Defaults ────────────────────────────────────
 PYTHON  ?= .venv/bin/python
@@ -27,6 +27,7 @@ help:
 	@echo "  install          Install requirements into .venv"
 	@echo "  smoke            One traced Gemini call -> prints LangSmith run URL"
 	@echo ""
+	@echo "  api              Start the FastAPI server -> /docs"
 	@echo "  qdrant           Start FinSight's isolated Qdrant on :6335"
 	@echo "  qdrant-check     Verify FinSight :6335 is up AND Athena :6333 is untouched"
 	@echo "  dev              Start the full stack (qdrant + api + ui)"
@@ -115,11 +116,15 @@ format:
 	$(PYTHON) -m isort .
 
 # ── Entrypoints ─────────────────────────────────
+api: .env
+	./run_api.sh
+
 ingest:
 	./run_ingest.sh
 
+# Pass a question:  make research Q="How did Apple's gross margin trend?"
 research:
-	./run_research.sh
+	./run_research.sh "$(Q)"
 
 monitor:
 	./run_monitor.sh --once
