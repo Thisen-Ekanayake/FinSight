@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from src.core.schemas import AgentFinding, Citation
+from src.research import citation_verifier as cv
 from src.research.citation_verifier import (
     Evidence,
     build_evidence_index,
@@ -348,6 +349,45 @@ class TestQualitativeExtraction:
         assert claims[0].text.startswith("Management")
 
 
+class TestEvidenceSelection:
+    """
+    A source_id identifies a whole FILING, so every retrieved chunk of one
+    10-K shares one identifier. Which chunks reach the judge decides the
+    verdict.
+    """
+
+    def test_the_most_relevant_excerpt_is_selected_not_the_first(self):
+        """
+        REGRESSION GUARD. Taking the first N candidates handed the judge
+        arbitrary chunks and ruled correct claims unsupported on evidence that
+        was never about them — three real risk-factor statements were stripped
+        from a live answer that way.
+        """
+        claim = extract_qualitative_claims(
+            "Apple flagged industrial accidents at suppliers [SRC:EDGAR:0000320193-25-000079]."
+        )[
+            0
+        ]  # noqa: E501
+        findings = [
+            _finding("Item 1A: the Company depends on third-party licensing of patents and trademarks", value=None),
+            _finding("Item 1A: foreign exchange rate movements affect reported net sales", value=None),
+            _finding("Item 1A: litigation and regulatory proceedings in multiple jurisdictions", value=None),
+            _finding("Item 1A: industrial accidents at suppliers and contract manufacturers", value=None),
+        ]
+        assert "industrial accidents" in cv._evidence_text(claim, findings, [])
+
+    def test_the_evidence_block_is_capped(self):
+        from src.research.config import MAX_EVIDENCE_PER_CLAIM
+
+        claim = extract_qualitative_claims("Apple flagged risks [SRC:EDGAR:0000320193-25-000079].")[0]
+        findings = [_finding(f"Item 1A: distinct risk number {i}", value=None) for i in range(20)]
+        assert cv._evidence_text(claim, findings, []).count("\n  - ") + 1 == MAX_EVIDENCE_PER_CLAIM
+
+    def test_a_source_with_nothing_retrieved_says_so(self):
+        claim = extract_qualitative_claims("Apple flagged risks [SRC:EDGAR:0000320193-25-000079].")[0]
+        assert "no supporting text" in cv._evidence_text(claim, [], [])
+
+
 class TestQualitativeJudging:
     def test_mock_response_bypasses_the_llm(self):
         claims = extract_qualitative_claims("Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].")
@@ -357,10 +397,8 @@ class TestQualitativeJudging:
         assert judge_qualitative_claims([], [], []) == []
 
     def test_an_unsupported_verdict_becomes_an_unsupported_claim(self):
-        import src.research.citation_verifier as verifier
-
-        original = verifier.judge_qualitative_claims
-        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "the excerpt is about pricing, not tariffs")]
+        original = cv.judge_qualitative_claims
+        cv.judge_qualitative_claims = lambda c, f, ci: [(False, "the excerpt is about pricing, not tariffs")]
         try:
             report = verify(
                 "Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].",
@@ -369,7 +407,7 @@ class TestQualitativeJudging:
                 use_llm=True,
             )
         finally:
-            verifier.judge_qualitative_claims = original
+            cv.judge_qualitative_claims = original
 
         assert not report["passed"]
         assert report["unsupported_claims"][0]["reason"].startswith("the excerpt")
@@ -379,27 +417,23 @@ class TestQualitativeJudging:
         Coverage must mean the same thing whether or not stage 2 ran, or it
         cannot be compared across eval experiments.
         """
-        import src.research.citation_verifier as verifier
-
         answer = "Revenue was $416.2B [SRC:EDGAR:0000320193-25-000079]. Management flagged tariffs [SRC:EDGAR:0000320193-25-000079]."  # noqa: E501
         findings = [_finding("AAPL revenue", metric="revenue@2025 FY", value=416161000000.0)]
 
-        original = verifier.judge_qualitative_claims
-        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
+        original = cv.judge_qualitative_claims
+        cv.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
         try:
             with_llm = verify(answer, findings, [_citation()], use_llm=True)
         finally:
-            verifier.judge_qualitative_claims = original
+            cv.judge_qualitative_claims = original
 
         without_llm = verify(answer, findings, [_citation()], use_llm=False)
         assert with_llm["citation_coverage"] == without_llm["citation_coverage"] == 1.0
         assert without_llm["passed"] and not with_llm["passed"]
 
     def test_a_qualitative_failure_is_routed_to_filings_rag(self):
-        import src.research.citation_verifier as verifier
-
-        original = verifier.judge_qualitative_claims
-        verifier.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
+        original = cv.judge_qualitative_claims
+        cv.judge_qualitative_claims = lambda c, f, ci: [(False, "unrelated")]
         try:
             report = verify(
                 "Management flagged tariffs [SRC:EDGAR:0000320193-25-000079].",
@@ -409,7 +443,7 @@ class TestQualitativeJudging:
                 use_llm=True,
             )
         finally:
-            verifier.judge_qualitative_claims = original
+            cv.judge_qualitative_claims = original
 
         assert report["unsupported_claims"][0]["origin_agent"] == "filings_rag"
 

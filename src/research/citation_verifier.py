@@ -542,28 +542,53 @@ def extract_qualitative_claims(answer: str) -> list[QualitativeClaim]:
     return claims
 
 
+# Content words for the relevance ranking below. Four characters drops "the",
+# "and", "its", "was" without needing a stopword list.
+_CONTENT_WORD_RE = re.compile(r"[a-z]{4,}")
+
+
+def _overlap(claim_text: str, candidate: str) -> int:
+    """Count content words shared between a claim and a candidate excerpt."""
+    return len(set(_CONTENT_WORD_RE.findall(claim_text.lower())) & set(_CONTENT_WORD_RE.findall(candidate.lower())))
+
+
 def _evidence_text(claim: QualitativeClaim, findings: list[AgentFinding], citations: list[Citation]) -> str:
     """
     Gather what the cited sources actually said, for the judge to read.
 
-    Pulls the retrieved excerpt from each cited citation and the claim text of
-    any finding carrying that citation — the specialist's own rendering of
-    what the tool returned.
+    Candidates are the retrieved excerpt of each cited citation plus the claim
+    text of any finding carrying that citation — the specialist's own rendering
+    of what the tool returned.
+
+    ══ THE SELECTION HAS TO BE BY RELEVANCE ══
+      A source_id identifies a whole FILING, so all eight retrieved chunks of
+      one 10-K share one identifier. Taking the first three off that pile hands
+      the judge three arbitrary chunks, and a claim actually supported by the
+      seventh is ruled unsupported on evidence that was never about it. That
+      failure showed up live: three correct risk-factor statements were
+      stripped from an answer because their supporting chunks came after the
+      cut. So candidates are ranked by content-word overlap with the claim
+      before the cap applies.
+
+      Overlap rather than embeddings on purpose: this runs per claim inside a
+      node that is already spending a `pro` call, and a lexical score is free,
+      deterministic, and sufficient for picking which chunk of one filing is
+      about tariffs versus litigation.
     """
     wanted = set(claim.source_ids)
-    parts: list[str] = []
+    candidates: list[str] = []
 
     for citation in citations:
         if (citation["source_type"], citation["source_id"]) in wanted and citation.get("excerpt"):
-            parts.append(str(citation["excerpt"]))
+            candidates.append(str(citation["excerpt"]))
 
     for finding in findings:
         if any((c["source_type"], c["source_id"]) in wanted for c in finding["citations"]):
-            parts.append(finding["claim"])
+            candidates.append(finding["claim"])
 
     seen: set[str] = set()
     unique: list[str] = []
-    for part in parts:
+    for part in candidates:
         if part not in seen:
             seen.add(part)
             unique.append(part)
@@ -571,7 +596,8 @@ def _evidence_text(claim: QualitativeClaim, findings: list[AgentFinding], citati
     if not unique:
         return "(no supporting text was retrieved for this source)"
 
-    return "\n".join(f"  - {p[:MAX_EVIDENCE_CHARS]}" for p in unique[:MAX_EVIDENCE_PER_CLAIM])
+    ranked = sorted(unique, key=lambda text: _overlap(claim.text, text), reverse=True)
+    return "\n".join(f"  - {p[:MAX_EVIDENCE_CHARS]}" for p in ranked[:MAX_EVIDENCE_PER_CLAIM])
 
 
 def judge_qualitative_claims(
