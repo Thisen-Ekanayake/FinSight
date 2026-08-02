@@ -85,10 +85,29 @@ _MASKS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bQ[1-4](?:\s+\d{4})?\b", re.IGNORECASE),
     re.compile(r"\bH[12]\s+\d{4}\b", re.IGNORECASE),
     re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    # Spelled-out dates, with and without a day. Every macro answer carries an
+    # "as of" date in this form, and matching the whole date is more robust
+    # than hoping the bare-year rule below survives whatever punctuation
+    # surrounds it.
+    re.compile(
+        r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+"
+        r"\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(?:19|20)\d{2}\b", re.IGNORECASE),
     # A bare year, but only where it cannot be part of a real figure: not
-    # preceded by a digit, comma, dot or currency symbol, and not followed by
+    # preceded by a digit, comma, dot or currency symbol, and not CONTINUED by
     # one. Without those guards this would eat the "2024" out of "2024.50".
-    re.compile(r"(?<![\d.,$€£])\b(?:19|20)\d{2}\b(?![\d.,%])"),
+    #
+    # Both trailing guards were live bugs from being too broad about what
+    # "continues a number":
+    #   `.` -> must be `\.\d`. "as of January 2026." ended a sentence, escaped
+    #          the mask, and got that sentence stripped from a correct answer.
+    #   `,` -> dropped entirely. "July 30, 2026, the rate was..." did the same.
+    #          A comma cannot continue a number here at all: NUMBER_RE's
+    #          thousands form is `\d{1,3}(?:,\d{3})+`, so a four-digit leading
+    #          group is unparseable either way and the guard protected nothing.
+    re.compile(r"(?<![\d.,$€£])\b(?:19|20)\d{2}\b(?![\d%]|\.\d)"),
 )
 
 # Scale suffixes, longest alternatives first so "million" is not consumed by

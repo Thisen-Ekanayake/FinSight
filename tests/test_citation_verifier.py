@@ -127,6 +127,50 @@ class TestExtractionExclusions:
         # real figure like a share price of 2024.50.
         assert _values(extract_numeric_claims("The share price was $2024.50")) == [2024.50]
 
+    def test_a_bare_decimal_that_starts_like_a_year_survives(self):
+        assert _values(extract_numeric_claims("The index closed at 2024.50")) == [2024.50]
+
+    def test_a_year_ending_a_sentence_is_not_a_claim(self):
+        """
+        REGRESSION GUARD, found live. The year mask's trailing guard was a
+        bare dot, so "as of January 2026." escaped it, became an ungrounded
+        numeric claim, and got its whole sentence stripped from a correct
+        answer. A period only makes a number when a digit follows it.
+        """
+        assert extract_numeric_claims("The rate was last updated in January 2026.") == []
+
+    def test_a_year_in_parentheses_is_not_a_claim(self):
+        assert extract_numeric_claims("The filing (2026) covers the period.") == []
+
+    def test_a_year_followed_by_a_comma_is_not_a_claim(self):
+        """
+        REGRESSION GUARD, found live. Every macro answer opens with "As of
+        July 30, 2026, ..." — the comma guard was meant for thousands
+        separators and swallowed the whole date instead.
+        """
+        assert extract_numeric_claims("As of July 30, 2026, the rate held.") == []
+
+    def test_a_spelled_out_date_is_not_a_claim(self):
+        for text in (
+            "As of July 30, 2026 the rate held",
+            "As of Jul. 30, 2026 the rate held",
+            "Since March 2026 the trend held",
+            "Filed on 1st January 2026",
+        ):
+            assert extract_numeric_claims(text) == [], text
+
+    def test_a_thousands_separated_figure_containing_year_digits_still_parses(self):
+        # Masking bare years must not disturb a real grouped number that
+        # happens to contain year-like digits.
+        assert _values(extract_numeric_claims("Revenue was 2,026,500 dollars")) == [2026500.0]
+
+    def test_a_full_macro_sentence_yields_only_its_rates(self):
+        text = (
+            "As of July 30, 2026, the Federal Funds Effective Rate was 3.63% "
+            "[SRC:FRED:DFF]. The unemployment rate was 4.2% [SRC:FRED:UNRATE] as of June 1, 2026."
+        )
+        assert _values(extract_numeric_claims(text)) == [3.63, 4.2]
+
     def test_small_integer_with_a_currency_symbol_is_a_claim(self):
         assert _values(extract_numeric_claims("EPS of $7.42")) == [7.42]
 
