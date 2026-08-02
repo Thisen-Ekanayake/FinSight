@@ -125,12 +125,16 @@ class TestDailyBudgets:
         assert rate_limit.BUDGET_SOFT_LIMIT < 1.0
 
     def test_counter_resets_on_a_new_utc_day(self):
-        from datetime import date, timedelta
+        from datetime import timedelta
 
         with patch.dict(rate_limit.DAILY_BUDGETS, {"fmp": 10}):
             rate_limit.record_call("fmp")
-            # Backdate the stored day to simulate the rollover.
-            rate_limit._BUDGET_STATE["fmp"] = (date.today() - timedelta(days=1), 999)
+            # Backdate the stored day to simulate the rollover. This MUST be
+            # relative to the module's own UTC date, not date.today(): in any
+            # timezone ahead of UTC, between local midnight and UTC midnight,
+            # "local yesterday" IS "UTC today" — so the counter would not reset
+            # and the test would fail for 5.5 hours a day in UTC+5:30.
+            rate_limit._BUDGET_STATE["fmp"] = (rate_limit._today() - timedelta(days=1), 999)
             rate_limit.check_budget("fmp")
 
     def test_status_snapshot_reports_every_metered_provider(self):
