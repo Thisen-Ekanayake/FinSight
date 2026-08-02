@@ -65,6 +65,38 @@ AGENT_CAPABILITIES: dict[str, str] = {
 # the answer rather than silently resolved.
 CONFLICT_REL_TOLERANCE: float = 0.01
 
+# ── Citation verification ───────────────────────────────
+# How close a number in the answer must be to a number a tool actually returned
+# to count as grounded. 0.5% absorbs legitimate rounding — "$391.0B" against a
+# filed 391,035,000,000 is a 0.009% difference — without letting a genuinely
+# different figure through.
+NUMERIC_REL_TOLERANCE: float = 0.005
+
+# Percentages need an absolute fallback: 0.50% vs 0.51% is only 0.01
+# percentage points apart but 2% in relative terms, which the tolerance above
+# would reject. Either test passing is enough.
+PERCENT_ABS_TOLERANCE: float = 0.05
+
+# Bare integers below this, carrying no currency symbol, scale suffix, or
+# percent sign, are prose rather than financial claims — list counts, item
+# numbers, "the 10-year Treasury", "over 5 sessions". Grounding them produces
+# noise and pointless repair attempts.
+IGNORE_BARE_INTEGERS_BELOW: float = 100.0
+
+# Cap on the pairwise ratio derivation in the evidence index. Groups are
+# (ticker, period) so they are small in practice; this bounds the O(n^2).
+MAX_DERIVATION_GROUP: int = 10
+
+# Repair fan-out ceiling. Five unsupported claims should not spawn five
+# branches — they are usually the same missing data seen from five angles.
+MAX_REPAIR_BRANCHES: int = 3
+
+# Appended by finalize when a claim could not be grounded and was removed.
+CAVEAT_TEMPLATE = (
+    "\n\n---\n*Note: {count} statement(s) could not be grounded in the retrieved "
+    "source data and were removed from this answer: {claims}*"
+)
+
 # ── Prompts ─────────────────────────────────────────────
 
 ROUTER_PROMPT_SYSTEM = """You are the routing layer of a financial research system. \
