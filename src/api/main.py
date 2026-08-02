@@ -130,6 +130,7 @@ def create_app() -> FastAPI:
     -------
     FastAPI
     """
+    from src.api.admin_routes import router as admin_router
     from src.api.research_routes import router as research_router
 
     app = FastAPI(
@@ -150,6 +151,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(research_router)
+    app.include_router(admin_router)
     return app
 
 
