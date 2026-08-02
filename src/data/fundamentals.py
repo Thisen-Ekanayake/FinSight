@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import date
 
 from src.core.errors import DataSourceError
 from src.data.edgar import COMMON_CONCEPTS, get_company_facts, resolve_cik
@@ -67,6 +68,112 @@ _YF_KEYS: dict[str, str] = {
 
 EDGAR_ACCESSION_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form}"
 
+# An annual duration must span roughly a year. A 10-K also carries its own Q4
+# figures, and a Q4 duration ENDS ON THE SAME DATE as the fiscal year — so
+# period_end alone cannot separate them, and a quarter passed off as a year is
+# a 4x error in a filed figure.
+ANNUAL_MIN_DAYS: int = 340
+ANNUAL_MAX_DAYS: int = 400
+
+
+# ══ TWO TRAPS IN THE companyfacts SHAPE ══
+#
+#   1. `fiscal_year` is the fiscal year of the FILING, not of the FACT. A 10-K
+#      restates two prior years in its comparative income statement and stamps
+#      all three with the filing's year:
+#
+#        NVDA "Revenues", accession 0001045810-26-000021, all fiscal_year=2026
+#          2023-01-30 -> 2024-01-28   $60.922B
+#          2024-01-29 -> 2025-01-26   $130.497B
+#          2025-01-27 -> 2026-01-25   $215.938B
+#
+#      Keying a period map on fiscal_year collapses those three into one, and
+#      whichever survives is whichever happened to be written last.
+#
+#   2. Filers SWITCH concepts between years. NVDA and Alphabet both stopped
+#      tagging revenue under RevenueFromContractWithCustomerExcludingAssessedTax
+#      and moved to Revenues. Taking the first concept that has any data
+#      returns a series that silently stops years ago while still looking
+#      complete — a correct citation on a stale number, which is the hardest
+#      kind of wrong answer to notice.
+def _duration_days(fact: XBRLFact) -> int:
+    """Length of the period a fact covers, in days. 0 for instant facts."""
+    start = fact.get("period_start")
+    if not start:
+        return 0
+    return (date.fromisoformat(fact["period_end"]) - date.fromisoformat(start)).days
+
+
+def _period_matches(fact: XBRLFact, *, annual_only: bool) -> bool:
+    """
+    Is this fact one of the periods the caller asked for?
+
+    Balance-sheet concepts (total assets, cash) are instants with no
+    ``period_start``, so duration cannot filter them — the 10-K form type
+    already does.
+    """
+    if not annual_only:
+        return True
+    if fact["form_type"] != "10-K":
+        return False
+    days = _duration_days(fact)
+    return days == 0 or ANNUAL_MIN_DAYS <= days <= ANNUAL_MAX_DAYS
+
+
+def _period_key(fact: XBRLFact) -> tuple[str, str]:
+    """Identify a reporting period by its own span, never by the filing's year."""
+    return (fact.get("period_start") or "", fact["period_end"])
+
+
+def _period_label(fact: XBRLFact) -> str:
+    """
+    Human-readable period, derived from the fact's own end date.
+
+    All five watchlist companies label a fiscal year by the calendar year it
+    ends in — NVDA's FY2026 ends January 2026, Apple's FY2025 ends September
+    2025 — so the end date is the reliable source for the label. The filing's
+    ``fiscal_year`` is not: it would label a FY2024 comparative as 2026.
+    """
+    year = fact["period_end"][:4]
+    # A full-year duration is FY whatever the filing calls it. Anything shorter
+    # takes the filing's own label, which is also right for instants: a balance
+    # in a 10-K is stamped FY, the same balance in a 10-Q is stamped Q3.
+    period = "FY" if _duration_days(fact) >= ANNUAL_MIN_DAYS else (fact["fiscal_period"] or "FY")
+    return f"{year} {period}".strip()
+
+
+def _freshest_concept(
+    facts: dict[str, list[XBRLFact]],
+    concepts: list[str],
+    *,
+    annual_only: bool,
+) -> str | None:
+    """
+    Pick the concept whose data reaches furthest forward, not the first with any.
+
+    Ties go to the earlier entry in ``METRIC_CONCEPTS``, which is the preferred
+    tag for the metric. Definitional consistency is preserved by using ONE
+    concept for the whole series rather than merging across tags — a revenue
+    line spliced from two different concepts is not a comparable trend.
+
+    Returns
+    -------
+    str or None
+        None when the company reports none of the concepts, which is a real
+        answer for a bank asked about gross profit.
+    """
+    best: tuple[str, str] | None = None
+
+    for concept in concepts:
+        usable = [f for f in facts.get(concept, []) if _period_matches(f, annual_only=annual_only)]
+        if not usable:
+            continue
+        latest = max(f["period_end"] for f in usable)
+        if best is None or latest > best[1]:
+            best = (concept, latest)
+
+    return best[0] if best else None
+
 
 def _from_edgar(
     ticker: str,
@@ -90,38 +197,41 @@ def _from_edgar(
 
     results: dict[str, list[FundamentalMetric]] = {}
     for metric in metrics:
-        for concept in METRIC_CONCEPTS.get(metric, []):
-            candidates = facts.get(concept, [])
-            if annual_only:
-                candidates = [f for f in candidates if f["form_type"] == "10-K"]
-            if not candidates:
-                continue
+        concept = _freshest_concept(facts, METRIC_CONCEPTS.get(metric, []), annual_only=annual_only)
+        if concept is None:
+            continue
 
-            # Companyfacts repeats a period across amended and later filings;
-            # keep one entry per fiscal period so "3 periods" means 3 years,
-            # not 3 restatements of the same year.
-            by_period: dict[str, XBRLFact] = {}
-            for fact in candidates:
-                by_period[f"{fact['fiscal_year']}-{fact['fiscal_period']}"] = fact
+        candidates = [f for f in facts.get(concept, []) if _period_matches(f, annual_only=annual_only)]
 
-            selected = sorted(by_period.values(), key=lambda f: (f["fiscal_year"], f["period_end"]))[-periods:]
+        # Companyfacts repeats a period across later filings, which carry it as
+        # a prior-year comparative. Key on the fact's OWN period so "3 periods"
+        # means 3 distinct years; see _period_key for why fiscal_year cannot.
+        by_period: dict[tuple[str, str], XBRLFact] = {}
+        for fact in candidates:
+            key = _period_key(fact)
+            previous = by_period.get(key)
+            # Earliest filing wins: that is the filing that first reported the
+            # figure, so it is the accession number a correct answer cites.
+            if previous is None or fact["filed_date"] < previous["filed_date"]:
+                by_period[key] = fact
 
-            results[metric] = [
-                FundamentalMetric(
-                    ticker=ticker.upper(),
-                    metric=metric,
-                    value=fact["value"],
-                    unit=fact["unit"],
-                    period=f"{fact['fiscal_year']} {fact['fiscal_period']}".strip(),
-                    as_of=fact["period_end"],
-                    provider="edgar_xbrl",
-                    # The accession number IS the citation. No LLM involved.
-                    source_id=fact["accession_no"],
-                    source_url=EDGAR_ACCESSION_URL.format(cik=cik, form=fact["form_type"]),
-                )
-                for fact in selected
-            ]
-            break  # first concept that has data wins
+        selected = sorted(by_period.values(), key=lambda f: f["period_end"])[-periods:]
+
+        results[metric] = [
+            FundamentalMetric(
+                ticker=ticker.upper(),
+                metric=metric,
+                value=fact["value"],
+                unit=fact["unit"],
+                period=_period_label(fact),
+                as_of=fact["period_end"],
+                provider="edgar_xbrl",
+                # The accession number IS the citation. No LLM involved.
+                source_id=fact["accession_no"],
+                source_url=EDGAR_ACCESSION_URL.format(cik=cik, form=fact["form_type"]),
+            )
+            for fact in selected
+        ]
 
     if not results:
         raise DataSourceError("edgar_xbrl", f"{ticker}: no requested metrics present in XBRL facts")
