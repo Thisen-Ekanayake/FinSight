@@ -77,14 +77,15 @@ class UnsupportedClaim(TypedDict):
     """
     A claim the citation verifier could not ground in tool output.
 
-    ``origin_agent`` and ``suggested_requery`` are what make the repair loop
-    targeted: only the agent that produced the bad claim is re-invoked, rather
-    than re-running the whole fan-out.
+    ``origin_agent``, ``ticker``, and ``suggested_requery`` are what make the
+    repair loop targeted: one agent is re-invoked for one ticker with one
+    focused question, rather than re-running the whole fan-out.
     """
 
     claim: str
     reason: str
     origin_agent: str
+    ticker: str
     suggested_requery: str
 
 
@@ -124,8 +125,13 @@ class ResearchState(TypedDict, total=False):
     conflicts: list[Conflict]
     draft_answer: str
 
-    # ── Verification (single writer: citation_verifier) — Phase 4 ──
+    # ── Verification (single writer: citation_verifier) ──
     verification: VerificationReport
+    # The verifier owns the whole repair POLICY and writes its decision here.
+    # after_verify then only has to look at whether this list is empty — a
+    # conditional edge cannot write state, so a rule split across the node and
+    # the edge would have to be evaluated twice and kept in sync by hand.
+    repair_targets: list[UnsupportedClaim]
     repair_count: int
 
     # ── Output (single writer: finalize) ──
@@ -158,5 +164,6 @@ def new_state(query: str, *, thread_id: str = "") -> ResearchState:
         errors=[],
         tool_calls=[],
         conflicts=[],
+        repair_targets=[],
         repair_count=0,
     )

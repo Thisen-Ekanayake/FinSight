@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.research.graph import COMPANY_SCOPED, build_research_graph, route_fanout
-from src.research.state import AGENT_NAMES, RoutePlan, new_state
+from src.research.graph import COMPANY_SCOPED, after_verify, build_research_graph, route_fanout
+from src.research.state import AGENT_NAMES, RoutePlan, UnsupportedClaim, new_state
 
 
 def _state(agents, tickers, *, query="test query", timeframe=None):
@@ -103,13 +103,58 @@ class TestSendPayloads:
         assert route_fanout(state)[0].arg["sub_question"] == "fallback query"
 
 
+def _unsupported(agent="fundamentals", ticker="AAPL", requery="what was revenue?") -> UnsupportedClaim:
+    return UnsupportedClaim(
+        claim="Revenue was $500B",
+        reason="matches no value any tool returned",
+        origin_agent=agent,
+        ticker=ticker,
+        suggested_requery=requery,
+    )
+
+
+def _verified_state(targets):
+    state = _state(["fundamentals"], ["AAPL"])
+    state["repair_targets"] = targets
+    return state
+
+
+class TestRepairRouting:
+    """
+    Send() appears twice in this graph. After the router it opens the fan-out;
+    after the verifier it re-enters ONE branch of it.
+    """
+
+    def test_a_clean_report_goes_straight_to_finalize(self):
+        assert after_verify(_verified_state([])) == "finalize"
+
+    def test_an_unsupported_claim_spawns_a_targeted_send(self):
+        sends = after_verify(_verified_state([_unsupported()]))
+        assert len(sends) == 1
+        assert sends[0].node == "fundamentals"
+
+    def test_the_repair_asks_the_suggested_question_not_the_original(self):
+        sends = after_verify(_verified_state([_unsupported(requery="Provide FY2025 revenue")]))
+        assert sends[0].arg["sub_question"] == "Provide FY2025 revenue"
+
+    def test_the_repair_carries_the_claim_s_own_ticker(self):
+        # A comparison query's repair must not go to the wrong company.
+        sends = after_verify(_verified_state([_unsupported(ticker="MSFT")]))
+        assert sends[0].arg["ticker"] == "MSFT"
+
+    def test_only_the_failing_agents_are_re_queried(self):
+        # The other three branches were fine and must not be paid for twice.
+        sends = after_verify(_verified_state([_unsupported(agent="macro")]))
+        assert {s.node for s in sends} == {"macro"}
+
+
 class TestGraphConstruction:
     def test_compiles(self):
         assert build_research_graph() is not None
 
     def test_contains_every_node(self):
         nodes = set(build_research_graph().get_graph().nodes)
-        for expected in ("router", "aggregator", *AGENT_NAMES):
+        for expected in ("router", "aggregator", "citation_verifier", "finalize", *AGENT_NAMES):
             assert expected in nodes
 
     def test_specialists_all_converge_on_the_aggregator(self):
@@ -118,8 +163,22 @@ class TestGraphConstruction:
         for agent in AGENT_NAMES:
             assert (agent, "aggregator") in targets
 
+    def test_the_aggregator_feeds_the_verifier(self):
+        edges = build_research_graph().get_graph().edges
+        assert ("aggregator", "citation_verifier") in {(e.source, e.target) for e in edges}
+
+    def test_the_verifier_can_reach_every_specialist(self):
+        """
+        The repair cycle is what makes this a graph rather than a pipeline —
+        the verifier can push work back into the specialists.
+        """
+        edges = build_research_graph().get_graph().edges
+        targets = {(e.source, e.target) for e in edges}
+        for agent in AGENT_NAMES:
+            assert ("citation_verifier", agent) in targets
+        assert ("citation_verifier", "finalize") in targets
+
     def test_accepts_a_checkpointer(self):
-        # Phase 4 wires a real one; the parameter must already be threaded.
         from langgraph.checkpoint.memory import InMemorySaver
 
         assert build_research_graph(checkpointer=InMemorySaver()) is not None
@@ -155,3 +214,18 @@ class TestEndToEnd:
         # Two tickers x one agent = two branches, so two tool calls.
         assert len(state["tool_calls"]) >= 2
         assert all(call["node"] for call in state["tool_calls"])
+
+    def test_the_answer_is_verified_before_it_is_returned(self):
+        from src.research.graph import run_research
+
+        state = run_research("What was Apple's revenue in fiscal 2025?")
+        assert state["final_answer"]
+        assert state["verification"]["citation_coverage"] >= 0.9
+
+    def test_the_repair_loop_is_bounded(self):
+        from src.research.config import MAX_REPAIR_ATTEMPTS
+        from src.research.graph import run_research
+
+        # Deliberately unanswerable from the ingested corpus.
+        state = run_research("What was Apple's revenue in fiscal 1998?")
+        assert state["repair_count"] <= MAX_REPAIR_ATTEMPTS

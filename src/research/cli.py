@@ -38,9 +38,26 @@ def _print_plan(plan: RoutePlan) -> None:
         print(f"    {agent:14s} {question}")
 
 
+def _print_verification(report: dict) -> None:
+    status = "PASSED" if report["passed"] else "FAILED"
+    print(f"\n{RULE}\nVERIFICATION  {status}")
+    print(f"  citation coverage   {report['citation_coverage']:.0%}")
+    print(f"  grounded claims     {len(report['verified_claims'])}")
+
+    for claim in report["unsupported_claims"]:
+        print(f"  UNSUPPORTED  {claim['reason']}")
+        print(f"               -> requery {claim['origin_agent']}({claim['ticker'] or 'n/a'})")
+    for marker in report["invalid_source_ids"]:
+        print(f"  BAD SOURCE   {marker}")
+
+
 def _print_answer(state: dict, *, show_audit: bool) -> None:
     print(f"\n{RULE}\nANSWER\n{RULE}")
-    print(state.get("draft_answer") or "(no answer produced)")
+    print(state.get("final_answer") or state.get("draft_answer") or "(no answer produced)")
+
+    report = state.get("verification")
+    if report:
+        _print_verification(report)
 
     citations = state.get("citations", [])
     if citations:
@@ -126,7 +143,11 @@ def main(argv: list[str] | None = None) -> int:
             if node == "router":
                 _print_plan(update["plan"])
                 print(f"\n{RULE}\nBRANCHES")
-            elif node != "aggregator":
+            elif node == "citation_verifier":
+                targets = update.get("repair_targets", [])
+                if targets:
+                    print(f"  {'repair':14s} re-querying {', '.join(t['origin_agent'] for t in targets)}")
+            elif node not in ("aggregator", "finalize"):
                 count = len(update.get("findings", []))
                 failed = update.get("errors", [])
                 mark = "FAILED" if failed else f"{count} findings"

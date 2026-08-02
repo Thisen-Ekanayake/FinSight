@@ -105,11 +105,14 @@ MAX_QUALITATIVE_CLAIMS: int = 8
 MAX_EVIDENCE_PER_CLAIM: int = 3
 MAX_EVIDENCE_CHARS: int = 700
 
-# Appended by finalize when a claim could not be grounded and was removed.
-CAVEAT_TEMPLATE = (
-    "\n\n---\n*Note: {count} statement(s) could not be grounded in the retrieved "
-    "source data and were removed from this answer: {claims}*"
-)
+# Appended by finalize when something was removed. Deliberately does NOT quote
+# the removed text: reprinting an ungrounded "$500B" in the disclosure puts the
+# number back in front of the reader, which is what the removal was for. The
+# full detail lives in the verification report, which the CLI and the API both
+# return alongside the answer.
+CAVEAT_TEMPLATE = "\n\n---\n*Note: {details} See the verification report for detail.*"
+CAVEAT_UNGROUNDED = "{count} statement(s) could not be grounded in the retrieved source data and were removed."
+CAVEAT_BAD_MARKERS = "{count} source reference(s) did not resolve to a retrieved source and were removed."
 
 # ── Prompts ─────────────────────────────────────────────
 

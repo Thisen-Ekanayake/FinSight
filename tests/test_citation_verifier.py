@@ -16,11 +16,14 @@ from src.research.citation_verifier import (
     build_evidence_index,
     extract_numeric_claims,
     extract_qualitative_claims,
+    finalize_node,
     find_support,
     judge_qualitative_claims,
+    plan_repairs,
     validate_source_markers,
     verify,
 )
+from src.research.state import UnsupportedClaim, VerificationReport
 
 
 def _citation(source_type: str = "EDGAR", source_id: str = "0000320193-25-000079") -> Citation:
@@ -409,6 +412,111 @@ class TestQualitativeJudging:
             verifier.judge_qualitative_claims = original
 
         assert report["unsupported_claims"][0]["origin_agent"] == "filings_rag"
+
+
+def _report(unsupported=(), invalid=(), passed=False):
+    return VerificationReport(
+        verified_claims=[],
+        unsupported_claims=list(unsupported),
+        invalid_source_ids=list(invalid),
+        citation_coverage=0.0,
+        passed=passed,
+    )
+
+
+def _unsupported(claim="Revenue was $500.0B.", agent="fundamentals", ticker="AAPL"):
+    return UnsupportedClaim(
+        claim=claim,
+        reason="matches no value any tool returned",
+        origin_agent=agent,
+        ticker=ticker,
+        suggested_requery=f"Provide the exact reported figure for: {claim}",
+    )
+
+
+class TestRepairPolicy:
+    """
+    An unbounded repair loop is how these systems spend real money on one
+    question. Bounded on attempts, branches, and kind.
+    """
+
+    def test_a_passing_report_needs_no_repair(self):
+        assert plan_repairs(_report(passed=True), repair_count=0) == []
+
+    def test_an_unsupported_claim_becomes_a_target(self):
+        assert len(plan_repairs(_report([_unsupported()]), repair_count=0)) == 1
+
+    def test_the_attempt_budget_is_respected(self):
+        from src.research.config import MAX_REPAIR_ATTEMPTS
+
+        assert plan_repairs(_report([_unsupported()]), repair_count=MAX_REPAIR_ATTEMPTS) == []
+
+    def test_claims_are_deduplicated_by_agent_and_ticker(self):
+        # Three ungrounded numbers about one company are one missing dataset,
+        # and three identical re-queries return the same three nothings.
+        claims = [_unsupported(claim=f"Figure {i} was $500B.") for i in range(3)]
+        assert len(plan_repairs(_report(claims), repair_count=0)) == 1
+
+    def test_different_tickers_get_their_own_branch(self):
+        claims = [_unsupported(ticker="AAPL"), _unsupported(ticker="MSFT")]
+        assert len(plan_repairs(_report(claims), repair_count=0)) == 2
+
+    def test_branch_count_is_capped(self):
+        from src.research.config import MAX_REPAIR_BRANCHES
+
+        claims = [_unsupported(ticker=f"TICK{i}") for i in range(10)]
+        assert len(plan_repairs(_report(claims), repair_count=0)) == MAX_REPAIR_BRANCHES
+
+    def test_an_invalid_marker_alone_does_not_trigger_a_repair(self):
+        """
+        A fabricated identifier is a synthesis error, not a data gap. The
+        specialist would return exactly what it returned before, so finalize
+        strips the marker instead of paying for an identical re-query.
+        """
+        assert (
+            plan_repairs(_report(invalid=["[SRC:EDGAR:1111111111-11-111111] — no such source"]), repair_count=0) == []
+        )
+
+
+class TestFinalize:
+    def test_a_passing_report_leaves_the_answer_alone(self):
+        state = {"draft_answer": "Revenue was $416.2B.", "verification": _report(passed=True)}
+        assert finalize_node(state)["final_answer"] == "Revenue was $416.2B."
+
+    def test_an_unsupported_claim_takes_its_sentence_with_it(self):
+        answer = "Revenue was $500.0B. Gross margin was 46.91%."
+        state = {"draft_answer": answer, "verification": _report([_unsupported(claim="Revenue was $500.0B.")])}
+        final = finalize_node(state)["final_answer"]
+        assert "$500.0B" not in final
+        assert "46.91%" in final
+
+    def test_the_removal_is_disclosed(self):
+        answer = "Revenue was $500.0B. Gross margin was 46.91%."
+        state = {"draft_answer": answer, "verification": _report([_unsupported(claim="Revenue was $500.0B.")])}
+        assert "could not be grounded" in finalize_node(state)["final_answer"]
+
+    def test_a_bad_marker_loses_the_marker_not_the_sentence(self):
+        """
+        Deleting a verified figure because its marker was malformed throws
+        away a correct claim over a formatting error.
+        """
+        answer = "Revenue was $416.2B [SRC:EDGAR:1111111111-11-111111]."
+        state = {
+            "draft_answer": answer,
+            "verification": _report(invalid=["[SRC:EDGAR:1111111111-11-111111] — no such source was retrieved"]),
+        }
+        final = finalize_node(state)["final_answer"]
+        assert "$416.2B" in final
+        assert "1111111111" not in final
+
+    def test_an_answer_grounded_in_nothing_says_so(self):
+        answer = "Revenue was $500.0B."
+        state = {"draft_answer": answer, "verification": _report([_unsupported(claim=answer)])}
+        assert "No part of this answer could be grounded" in finalize_node(state)["final_answer"]
+
+    def test_a_missing_report_passes_the_draft_through(self):
+        # Defensive: the node must not crash if it somehow runs first.
+        assert finalize_node({"draft_answer": "text"})["final_answer"] == "text"
 
 
 @pytest.mark.llm

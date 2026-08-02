@@ -451,6 +451,20 @@ def validate_source_markers(answer: str, citations: list[Citation]) -> list[str]
 _NUMERIC_AGENT_PRIORITY: tuple[str, ...] = ("fundamentals", "technical", "macro")
 
 
+def _infer_ticker(sentence: str, tickers: list[str]) -> str:
+    """
+    Find which ticker an unsupported sentence is about.
+
+    A repair needs a ticker, and guessing the first one in the plan sends a
+    comparison query's repair to the wrong company half the time.
+    """
+    upper = sentence.upper()
+    for ticker in tickers:
+        if ticker.upper() in upper:
+            return ticker
+    return tickers[0] if tickers else ""
+
+
 def _infer_origin(selected_agents: list[str]) -> str:
     """
     Pick the specialist most likely to close an unsupported numeric claim.
@@ -649,6 +663,7 @@ def verify(
     citations: list[Citation],
     *,
     selected_agents: list[str] | None = None,
+    tickers: list[str] | None = None,
     use_llm: bool = False,
 ) -> VerificationReport:
     """
@@ -669,6 +684,8 @@ def verify(
     selected_agents : list of str, optional
         The router's plan, used to target repairs at an agent that was
         actually in it.
+    tickers : list of str, optional
+        The plan's tickers, used to point a repair at the right company.
     use_llm : bool, default False
         Run stage 2. Off by default so ``verify`` stays free and reproducible;
         the graph node turns it on from config.
@@ -681,6 +698,7 @@ def verify(
         — there is nothing to get wrong.
     """
     agents = selected_agents or []
+    symbols = tickers or []
     index = build_evidence_index(findings)
     claims = extract_numeric_claims(answer)
 
@@ -699,6 +717,7 @@ def verify(
                 claim=sentence or claim.text,
                 reason=f"'{claim.text}' matches no value any tool returned",
                 origin_agent=_infer_origin(agents),
+                ticker=_infer_ticker(sentence or claim.text, symbols),
                 suggested_requery=f"Provide the exact reported figure for: {sentence or claim.text}",
             )
         )
@@ -721,6 +740,7 @@ def verify(
                     claim=audited.text,
                     reason=reason or "the cited source does not support this statement",
                     origin_agent="filings_rag" if "filings_rag" in agents else _infer_origin(agents),
+                    ticker=_infer_ticker(audited.text, symbols),
                     suggested_requery=f"Find disclosure text that directly addresses: {audited.text}",
                 )
             )
@@ -743,11 +763,67 @@ def verify(
     return report
 
 
+def plan_repairs(report: VerificationReport, *, repair_count: int) -> list[UnsupportedClaim]:
+    """
+    Decide which claims are worth re-querying for.
+
+    Bounded on three axes, because an unbounded repair loop is how these
+    systems spend real money on one question:
+
+    * **Attempts** — ``MAX_REPAIR_ATTEMPTS`` passes, then finalize strips what
+      is left rather than trying again.
+    * **Branches** — deduplicated by ``(agent, ticker)`` and capped. Five
+      unsupported claims are usually the same missing data seen five ways, and
+      five identical re-queries return the same five nothings.
+    * **Kind** — invalid source markers do NOT trigger a repair. A fabricated
+      identifier is a synthesis error, not a data gap; the specialist would
+      return exactly what it returned before. Finalize strips the marker.
+
+    Parameters
+    ----------
+    report : VerificationReport
+        Output of ``verify``.
+    repair_count : int
+        Repair passes already spent on this query.
+
+    Returns
+    -------
+    list of UnsupportedClaim
+        At most ``MAX_REPAIR_BRANCHES``, one per (agent, ticker) pair. Empty
+        when the answer verified or the budget is exhausted.
+    """
+    from src.research.config import MAX_REPAIR_ATTEMPTS, MAX_REPAIR_BRANCHES
+
+    if repair_count >= MAX_REPAIR_ATTEMPTS:
+        if report["unsupported_claims"]:
+            logger.info("Repair budget spent (%d attempts) — finalize will strip the rest", repair_count)
+        return []
+
+    targets: list[UnsupportedClaim] = []
+    seen: set[tuple[str, str]] = set()
+
+    for claim in report["unsupported_claims"]:
+        key = (claim["origin_agent"], claim["ticker"])
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(claim)
+        if len(targets) >= MAX_REPAIR_BRANCHES:
+            break
+
+    return targets
+
+
 def citation_verifier_node(state: ResearchState) -> dict:
     """
-    Graph node: verify the drafted answer.
+    Graph node: verify the drafted answer and decide whether to repair.
 
-    Returns a partial state with ``verification``. Single writer, so no reducer.
+    Owns the whole repair policy. ``after_verify`` is then a one-line edge
+    that reads ``repair_targets`` — a conditional edge cannot write state, so
+    splitting the rule across both would mean evaluating it twice.
+
+    Returns a partial state with ``verification``, ``repair_targets``, and
+    ``repair_count``. All single-writer, so none needs a reducer.
     """
     plan: dict = dict(state.get("plan") or {})
     report = verify(
@@ -755,6 +831,99 @@ def citation_verifier_node(state: ResearchState) -> dict:
         state.get("findings", []),
         state.get("citations", []),
         selected_agents=list(plan.get("selected_agents", [])),
+        tickers=list(plan.get("tickers", [])),
         use_llm=VERIFY_QUALITATIVE_CLAIMS,
     )
-    return {"verification": report}
+
+    spent = state.get("repair_count", 0)
+    targets = plan_repairs(report, repair_count=spent)
+    if targets:
+        logger.info("Repairing %d claim(s) via %s", len(targets), [t["origin_agent"] for t in targets])
+
+    return {
+        "verification": report,
+        "repair_targets": targets,
+        "repair_count": spent + (1 if targets else 0),
+    }
+
+
+# ── Finalize ────────────────────────────────────────────
+def strip_unsupported(answer: str, report: VerificationReport) -> tuple[str, list[str], list[str]]:
+    """
+    Remove what could not be grounded, leaving what could.
+
+    Two different repairs for two different faults:
+
+    * An unsupported claim takes its whole sentence with it. The number is
+      wrong or unfounded, and the sentence around it exists to assert it.
+    * An invalid source marker is deleted on its own, leaving the sentence.
+      Deleting a verified figure because its marker was malformed would throw
+      away a correct claim over a formatting error.
+
+    Parameters
+    ----------
+    answer : str
+        The drafted answer.
+    report : VerificationReport
+        Output of ``verify``.
+
+    Returns
+    -------
+    tuple
+        ``(cleaned_answer, removed_claims, removed_markers)``.
+    """
+    removed_claims: list[str] = []
+    removed_markers: list[str] = []
+    cleaned = answer
+
+    for claim in report["unsupported_claims"]:
+        if claim["claim"] and claim["claim"] in cleaned:
+            cleaned = cleaned.replace(claim["claim"], "")
+            removed_claims.append(claim["claim"])
+
+    for marker in report["invalid_source_ids"]:
+        token = marker.split(" — ")[0]
+        if token in cleaned:
+            cleaned = cleaned.replace(token, "")
+            removed_markers.append(token)
+
+    # Collapse the holes the removals left behind.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
+
+    return cleaned, removed_claims, removed_markers
+
+
+def finalize_node(state: ResearchState) -> dict:
+    """
+    Graph node: produce the answer the user actually sees.
+
+    A still-unsupported claim is removed and disclosed, not quietly kept and
+    not silently dropped. Saying "one statement could not be grounded" is
+    worth more than a fluent paragraph resting on a number no tool returned.
+    """
+    from src.research.config import CAVEAT_BAD_MARKERS, CAVEAT_TEMPLATE, CAVEAT_UNGROUNDED
+
+    answer = state.get("draft_answer", "")
+    report = state.get("verification")
+
+    if report is None or report["passed"]:
+        return {"final_answer": answer}
+
+    cleaned, claims, markers = strip_unsupported(answer, report)
+
+    if not claims and not markers:
+        return {"final_answer": answer}
+
+    if not cleaned:
+        cleaned = "No part of this answer could be grounded in the retrieved source data."
+
+    details = []
+    if claims:
+        details.append(CAVEAT_UNGROUNDED.format(count=len(claims)))
+    if markers:
+        details.append(CAVEAT_BAD_MARKERS.format(count=len(markers)))
+
+    logger.warning("Finalize removed %d claim(s) and %d marker(s)", len(claims), len(markers))
+    return {"final_answer": cleaned + CAVEAT_TEMPLATE.format(details=" ".join(details))}

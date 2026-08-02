@@ -2,10 +2,12 @@
 # FinSight — Research Graph
 # ═══════════════════════════════════════════════════════
 #
-# Purpose : Wire the router, specialists, and aggregator into a StateGraph.
+# Purpose : Wire the router, specialists, aggregator, verifier, and finalizer
+#           into a StateGraph.
 #
 # Public API:
 #   route_fanout(state)      the conditional edge that spawns branches
+#   after_verify(state)      the conditional edge that repairs or finalizes
 #   build_research_graph()   compiled graph
 #   run_research(query)      convenience wrapper
 #
@@ -38,6 +40,7 @@ from typing import Any
 
 from src.research.agents import AGENT_NODES
 from src.research.aggregator import aggregator_node
+from src.research.citation_verifier import citation_verifier_node, finalize_node
 from src.research.config import RECURSION_LIMIT
 from src.research.router import router_node
 from src.research.state import AGENT_NAMES, ResearchState, new_state
@@ -109,19 +112,75 @@ def route_fanout(state: ResearchState) -> list[Any]:
     return sends
 
 
+def after_verify(state: ResearchState) -> str | list[Any]:
+    """
+    Conditional edge: repair the ungrounded claims, or finalize.
+
+    Send() appears here for the second time in the graph and does something
+    different than it does after the router. There it opened the fan-out; here
+    it re-enters ONE branch of it. The repair is targeted — only the agent
+    that should have produced the missing figure runs again, with a question
+    written from the claim that failed, rather than the whole fan-out
+    re-executing and re-paying for the branches that were already correct.
+
+    The decision itself lives in citation_verifier_node, which wrote
+    ``repair_targets``. This edge only reads it: a conditional edge cannot
+    write state, so a policy split across both would be evaluated twice.
+
+    Parameters
+    ----------
+    state : ResearchState
+        Must contain ``repair_targets``, written by the verifier.
+
+    Returns
+    -------
+    str or list of Send
+        ``"finalize"``, or one Send per claim worth another attempt.
+    """
+    from langgraph.types import Send
+
+    targets = state.get("repair_targets", [])
+    if not targets:
+        return "finalize"
+
+    plan: dict = dict(state.get("plan") or {})
+    return [
+        Send(
+            claim["origin_agent"],
+            {
+                "query": state["query"],
+                "ticker": claim["ticker"],
+                "sub_question": claim["suggested_requery"],
+                "timeframe": plan.get("timeframe"),
+            },
+        )
+        for claim in targets
+    ]
+
+
 def build_research_graph(checkpointer: Any = None) -> Any:
     """
     Build and compile the research graph.
 
     Topology::
 
-        START -> router --(Send: dynamic fan-out)--> [specialists] -> aggregator -> END
+        START -> router --(Send: dynamic fan-out)--> [specialists] -> aggregator
+                                                          ^              |
+                                                          |              v
+                                     (Send: targeted repair) <-- citation_verifier
+                                                                         |
+                                                                         v
+                                                                   finalize -> END
+
+    The cycle is what makes this a graph rather than a pipeline: the verifier
+    can push work back into the specialists. It is bounded by
+    MAX_REPAIR_ATTEMPTS, and ``recursion_limit`` is the backstop if that fails.
 
     Parameters
     ----------
     checkpointer : optional
-        LangGraph checkpointer. Wired in Phase 4 for durable execution and the
-        thread-based audit trail.
+        LangGraph checkpointer. With one, every superstep is persisted and the
+        thread can be replayed — which is what the audit-trail endpoint reads.
 
     Returns
     -------
@@ -135,6 +194,8 @@ def build_research_graph(checkpointer: Any = None) -> Any:
     for name in AGENT_NAMES:
         graph.add_node(name, AGENT_NODES[name])
     graph.add_node("aggregator", aggregator_node)
+    graph.add_node("citation_verifier", citation_verifier_node)
+    graph.add_node("finalize", finalize_node)
 
     graph.add_edge(START, "router")
     # path_map lists every node route_fanout may target; LangGraph needs it to
@@ -143,7 +204,11 @@ def build_research_graph(checkpointer: Any = None) -> Any:
 
     for name in AGENT_NAMES:
         graph.add_edge(name, "aggregator")
-    graph.add_edge("aggregator", END)
+    graph.add_edge("aggregator", "citation_verifier")
+    # A repaired branch re-enters at the specialist and flows back through the
+    # aggregator, so the answer is re-synthesised with the new findings.
+    graph.add_conditional_edges("citation_verifier", after_verify, ["finalize", *AGENT_NAMES])
+    graph.add_edge("finalize", END)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -162,8 +227,9 @@ def run_research(query: str, *, thread_id: str = "") -> ResearchState:
     Returns
     -------
     ResearchState
-        Final state, including ``draft_answer``, ``findings``, ``citations``,
-        ``conflicts``, and the ``tool_calls`` audit trail.
+        Final state, including ``final_answer``, ``verification``,
+        ``findings``, ``citations``, ``conflicts``, and the ``tool_calls``
+        audit trail.
     """
     graph = build_research_graph()
     config: dict[str, Any] = {"recursion_limit": RECURSION_LIMIT}
