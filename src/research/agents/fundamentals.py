@@ -19,7 +19,7 @@ import logging
 import time
 
 from src.core.schemas import make_citation
-from src.data.fundamentals import METRIC_CONCEPTS, get_fundamentals
+from src.data.fundamentals import METRIC_CONCEPTS, get_fundamentals_history
 from src.research.agents._common import finding, specialist, tool_record
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,10 @@ _METRIC_KEYWORDS: list[tuple[tuple[str, ...], list[str]]] = [
 _DEFAULT_METRICS = ["revenue", "net_income", "gross_profit", "operating_income"]
 
 _UNIT_LABEL = {"USD": "USD", "USD/shares": "USD per share", "shares": "shares"}
+
+# Reporting periods fetched per metric. Three annual periods is enough to
+# show a trend without flooding the synthesis prompt.
+REPORTED_PERIODS: int = 3
 
 
 def select_metrics(sub_question: str) -> list[str]:
@@ -91,52 +95,60 @@ def fundamentals_node(payload: dict, ticker: str) -> tuple[list, list, list]:
     metrics = select_metrics(sub_question)
 
     started = time.monotonic()
-    data = get_fundamentals(ticker, metrics=metrics, annual_only=True)
+    # Several periods, not just the latest. One value cannot answer "how did
+    # margin trend?" — there is nothing to compare — and cannot answer "in
+    # fiscal 2024" for a company whose most recent 10-K is a different year.
+    history = get_fundamentals_history(ticker, metrics=metrics, annual_only=True, periods=REPORTED_PERIODS)
     elapsed = int((time.monotonic() - started) * 1000)
 
+    first_record = next((records[0] for records in history.values() if records), None)
     calls = [
         tool_record(
             AGENT,
-            "get_fundamentals",
-            args={"ticker": ticker, "metrics": metrics},
-            provider=next(iter(data.values()))["provider"] if data else "none",
+            "get_fundamentals_history",
+            args={"ticker": ticker, "metrics": metrics, "periods": REPORTED_PERIODS},
+            provider=first_record["provider"] if first_record else "none",
             latency_ms=elapsed,
-            ok=bool(data),
+            ok=bool(history),
         )
     ]
 
-    if not data:
+    if not history:
         return [], [], calls
 
     findings = []
     citations = []
 
-    for name, record in sorted(data.items()):
-        citation = make_citation(
-            "EDGAR" if record["provider"] == "edgar_xbrl" else record["provider"].upper(),  # type: ignore[arg-type]
-            record["source_id"],
-            as_of=record["as_of"],
-            url=record["source_url"],
-        )
-        citations.append(citation)
-
-        unit = _UNIT_LABEL.get(record["unit"], record["unit"])
+    for name, records in sorted(history.items()):
         readable = name.replace("_", " ")
-        findings.append(
-            finding(
-                AGENT,
-                f"{ticker} reported {readable} of {record['value']:,.0f} {unit} for {record['period']}",
-                ticker=ticker,
-                metric=name,
-                # Raw figure, not a formatted string — the citation verifier
-                # matches numbers in the answer against exactly this.
-                value=record["value"],
-                unit=record["unit"],
-                citations=[citation],
-                # A fallback provider is less trustworthy than a filed figure,
-                # and the aggregator ranks on this.
-                confidence=1.0 if record["provider"] == "edgar_xbrl" else 0.7,
+
+        for record in records:
+            citation = make_citation(
+                "EDGAR" if record["provider"] == "edgar_xbrl" else record["provider"].upper(),  # type: ignore[arg-type]
+                record["source_id"],
+                as_of=record["as_of"],
+                url=record["source_url"],
             )
-        )
+            citations.append(citation)
+
+            unit = _UNIT_LABEL.get(record["unit"], record["unit"])
+            findings.append(
+                finding(
+                    AGENT,
+                    f"{ticker} reported {readable} of {record['value']:,.0f} {unit} for {record['period']}",
+                    ticker=ticker,
+                    # Metric key includes the period, so the aggregator does
+                    # not mistake two different years for a source conflict.
+                    metric=f"{name}@{record['period']}",
+                    # Raw figure, not a formatted string — the citation verifier
+                    # matches numbers in the answer against exactly this.
+                    value=record["value"],
+                    unit=record["unit"],
+                    citations=[citation],
+                    # A fallback provider is less trustworthy than a filed figure,
+                    # and the aggregator ranks on this.
+                    confidence=1.0 if record["provider"] == "edgar_xbrl" else 0.7,
+                )
+            )
 
     return findings, citations, calls

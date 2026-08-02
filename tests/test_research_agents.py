@@ -206,7 +206,7 @@ class TestTechnicalInterpretation:
 
 class TestFundamentalsNode:
     def test_empty_result_yields_no_findings(self):
-        with patch("src.research.agents.fundamentals.get_fundamentals", return_value={}):
+        with patch("src.research.agents.fundamentals.get_fundamentals_history", return_value={}):
             result = AGENT_NODES["fundamentals"]({"ticker": "AAPL", "sub_question": "revenue?"})
         assert result["findings"] == []
         assert result["tool_calls"][0]["ok"] is False
@@ -215,19 +215,21 @@ class TestFundamentalsNode:
         # The citation verifier matches answer numbers against this, so a
         # formatted string here would break grounding.
         fake = {
-            "revenue": {
-                "ticker": "AAPL",
-                "metric": "revenue",
-                "value": 416161000000.0,
-                "unit": "USD",
-                "period": "2025 FY",
-                "as_of": "2025-09-27",
-                "provider": "edgar_xbrl",
-                "source_id": "0000320193-25-000079",
-                "source_url": "https://www.sec.gov/x",
-            }
+            "revenue": [
+                {
+                    "ticker": "AAPL",
+                    "metric": "revenue",
+                    "value": 416161000000.0,
+                    "unit": "USD",
+                    "period": "2025 FY",
+                    "as_of": "2025-09-27",
+                    "provider": "edgar_xbrl",
+                    "source_id": "0000320193-25-000079",
+                    "source_url": "https://www.sec.gov/x",
+                }
+            ]
         }
-        with patch("src.research.agents.fundamentals.get_fundamentals", return_value=fake):
+        with patch("src.research.agents.fundamentals.get_fundamentals_history", return_value=fake):
             result = AGENT_NODES["fundamentals"]({"ticker": "AAPL", "sub_question": "revenue?"})
 
         assert result["findings"][0]["value"] == 416161000000.0
@@ -235,19 +237,21 @@ class TestFundamentalsNode:
 
     def test_fallback_provider_lowers_confidence(self):
         fake = {
-            "revenue": {
-                "ticker": "AAPL",
-                "metric": "revenue",
-                "value": 1.0,
-                "unit": "USD",
-                "period": "TTM",
-                "as_of": "2026-01-01",
-                "provider": "yfinance",
-                "source_id": "AAPL@2026-01-01",
-                "source_url": "https://finance.yahoo.com/quote/AAPL",
-            }
+            "revenue": [
+                {
+                    "ticker": "AAPL",
+                    "metric": "revenue",
+                    "value": 1.0,
+                    "unit": "USD",
+                    "period": "TTM",
+                    "as_of": "2026-01-01",
+                    "provider": "yfinance",
+                    "source_id": "AAPL@2026-01-01",
+                    "source_url": "https://finance.yahoo.com/quote/AAPL",
+                }
+            ]
         }
-        with patch("src.research.agents.fundamentals.get_fundamentals", return_value=fake):
+        with patch("src.research.agents.fundamentals.get_fundamentals_history", return_value=fake):
             result = AGENT_NODES["fundamentals"]({"ticker": "AAPL", "sub_question": "revenue?"})
 
         assert result["findings"][0]["confidence"] < 1.0
