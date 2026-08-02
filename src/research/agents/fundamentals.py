@@ -48,6 +48,32 @@ _DEFAULT_METRICS = ["revenue", "net_income", "gross_profit", "operating_income"]
 
 _UNIT_LABEL = {"USD": "USD", "USD/shares": "USD per share", "shares": "shares"}
 
+# Below this magnitude a figure's decimals ARE the figure. Formatting EPS of
+# 20.02 with ",.0f" renders "20" — and because the claim text is itself
+# evidence for the citation verifier, the answer then grounds "20" perfectly
+# while being wrong by two cents a share. A rounding rule that is harmless on
+# a revenue line is destructive on a per-share one.
+DECIMAL_BELOW: float = 1_000.0
+
+
+def format_value(value: float) -> str:
+    """
+    Render a filed figure without discarding significant digits.
+
+    Parameters
+    ----------
+    value : float
+        The figure as reported.
+
+    Returns
+    -------
+    str
+        Thousands-separated with no decimals for large figures, two decimals
+        for small ones (EPS, per-share book value, ratios).
+    """
+    return f"{value:,.0f}" if abs(value) >= DECIMAL_BELOW else f"{value:,.2f}"
+
+
 # Reporting periods fetched per metric. Three annual periods is enough to
 # show a trend without flooding the synthesis prompt.
 REPORTED_PERIODS: int = 3
@@ -135,7 +161,7 @@ def fundamentals_node(payload: dict, ticker: str) -> tuple[list, list, list]:
             findings.append(
                 finding(
                     AGENT,
-                    f"{ticker} reported {readable} of {record['value']:,.0f} {unit} for {record['period']}",
+                    f"{ticker} reported {readable} of {format_value(record['value'])} {unit} for {record['period']}",
                     ticker=ticker,
                     # Metric key includes the period, so the aggregator does
                     # not mistake two different years for a source conflict.

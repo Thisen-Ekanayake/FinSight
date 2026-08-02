@@ -235,6 +235,38 @@ class TestFundamentalsNode:
         assert result["findings"][0]["value"] == 416161000000.0
         assert result["findings"][0]["citations"][0]["source_id"] == "0000320193-25-000079"
 
+    def test_a_per_share_figure_keeps_its_decimals(self):
+        # Found by the Phase 5 eval. ",.0f" rendered EPS of 20.02 as "20", and
+        # because the claim TEXT is itself evidence for the citation verifier,
+        # the answer then grounded "20 USD" perfectly while being wrong by two
+        # cents a share. Every citation check passed on a wrong number.
+        fake = {
+            "eps_diluted": [
+                {
+                    "ticker": "JPM",
+                    "metric": "eps_diluted",
+                    "value": 20.02,
+                    "unit": "USD/shares",
+                    "period": "2025 FY",
+                    "as_of": "2025-12-31",
+                    "provider": "edgar_xbrl",
+                    "source_id": "0001628280-26-008131",
+                    "source_url": "https://www.sec.gov/x",
+                }
+            ]
+        }
+        with patch("src.research.agents.fundamentals.get_fundamentals_history", return_value=fake):
+            result = AGENT_NODES["fundamentals"]({"ticker": "JPM", "sub_question": "eps?"})
+
+        assert "20.02" in result["findings"][0]["claim"]
+
+    def test_a_large_figure_is_still_rendered_without_decimals(self):
+        from src.research.agents.fundamentals import format_value
+
+        assert format_value(416161000000.0) == "416,161,000,000"
+        assert format_value(20.02) == "20.02"
+        assert format_value(-3.5) == "-3.50"
+
     def test_fallback_provider_lowers_confidence(self):
         fake = {
             "revenue": [
