@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
 
@@ -42,16 +42,22 @@ from src.data.config import (
 )
 from src.data.rate_limit import guard, record_call
 
+if TYPE_CHECKING:  # pragma: no cover
+    from requests_cache import CachedSession
+
 logger = logging.getLogger(__name__)
 
-_SESSIONS: dict[str, requests.Session] = {}
+# Typed as CachedSession, not requests.Session: the per-request `expire_after`
+# kwarg used below is a requests-cache extension, and annotating the base class
+# would hide that from the type checker.
+_SESSIONS: dict[str, "CachedSession"] = {}
 _SESSION_LOCK = threading.Lock()
 
 # Providers whose requests must carry the SEC contact header.
 _SEC_PROVIDERS: frozenset[str] = frozenset({"sec", "edgar", "edgar_xbrl"})
 
 
-def _build_session(provider: str) -> requests.Session:
+def _build_session(provider: str) -> "CachedSession":
     """Construct a caching, retrying session with provider-appropriate headers."""
     import requests_cache
     from urllib3.util.retry import Retry
@@ -92,7 +98,7 @@ def _build_session(provider: str) -> requests.Session:
     return session
 
 
-def get_session(provider: str) -> requests.Session:
+def get_session(provider: str) -> "CachedSession":
     """
     Return the shared session for a provider, building it on first use.
 
@@ -103,7 +109,7 @@ def get_session(provider: str) -> requests.Session:
 
     Returns
     -------
-    requests.Session
+    CachedSession
         Cached and retrying, with the provider's required headers applied.
     """
     with _SESSION_LOCK:
