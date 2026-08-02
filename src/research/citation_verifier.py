@@ -276,12 +276,25 @@ def _derive(structured: list[tuple[str, str, str, Evidence]]) -> list[Evidence]:
     """
     Compute the arithmetic an analyst would legitimately do.
 
-    Two families only:
+    Three families only:
 
     * **Ratios** between absolute figures from the same ticker and period —
       this is gross margin, operating margin, and every other percentage the
       synthesizer computes rather than reads.
-    * **Growth** in one metric between two periods.
+    * **Growth** in one metric between two periods, as a percentage.
+    * **Change** in one metric between two periods, as an absolute figure.
+
+    The third exists because "revenue increased by $50,115,000,000, rising from
+    $281,724,000,000 to $331,839,000,000" is the most natural way to answer a
+    question about change, and the difference appears in no finding. Without
+    it stage 1 flags a correct sentence, and finalize then deletes the sentence
+    — taking the two correct filed figures inside it along with the subtraction.
+    A single underivable value poisoning an otherwise perfect sentence is how
+    an answer ends up as "No part of this answer could be grounded."
+
+    The line is drawn at these three deliberately. Allowing arbitrary
+    arithmetic would make almost any number reachable from any other two, and
+    an evidence index that grounds everything grounds nothing.
 
     Parameters
     ----------
@@ -325,14 +338,24 @@ def _derive(structured: list[tuple[str, str, str, Evidence]]) -> list[Evidence]:
         if len(members) > MAX_DERIVATION_GROUP:
             continue
         for (period_a, ev_a), (period_b, ev_b) in permutations(members, 2):
+            citations = [*ev_a.citations, *ev_b.citations]
+            derived.append(
+                Evidence(
+                    value=ev_b.value - ev_a.value,
+                    kind="absolute",
+                    label=f"{name} change {period_a}->{period_b}",
+                    citations=citations,
+                    derived=True,
+                )
+            )
             if not ev_a.value:
                 continue
             derived.append(
                 Evidence(
                     value=(ev_b.value - ev_a.value) / abs(ev_a.value) * 100.0,
                     kind="percent",
-                    label=f"{name} change {period_a}->{period_b}",
-                    citations=[*ev_a.citations, *ev_b.citations],
+                    label=f"{name} growth {period_a}->{period_b}",
+                    citations=citations,
                     derived=True,
                 )
             )
@@ -349,7 +372,7 @@ def build_evidence_index(findings: list[AgentFinding]) -> list[Evidence]:
     1. Each finding's structured ``value`` — what the tool returned.
     2. Every number inside each finding's ``claim`` text, which the specialist
        built from tool output with an f-string. No model writes those strings.
-    3. Ratios and growth rates derived from (1) — see ``_derive``.
+    3. Ratios, changes, and growth rates derived from (1) — see ``_derive``.
 
     Parameters
     ----------

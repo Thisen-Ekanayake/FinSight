@@ -232,6 +232,42 @@ class TestEvidenceIndex:
         # (416161 - 391035) / 391035 = 6.42%
         assert any(e.derived and abs(e.value - 6.4255) < 0.01 for e in index)
 
+    def test_period_over_period_change_is_derived_as_an_absolute(self):
+        # Found by the Phase 5 eval on a live run. "Revenue increased by
+        # $50,115,000,000, rising from $281,724,000,000 to $331,839,000,000" is
+        # the natural way to answer a question about change, and the difference
+        # appears in no finding. Stage 1 flagged the sentence, finalize deleted
+        # it, and the two CORRECT filed figures inside went with it — the whole
+        # answer came back as "No part of this answer could be grounded."
+        index = build_evidence_index(
+            [
+                _finding("revenue", metric="revenue@2025 FY", value=281724000000.0),
+                _finding("revenue", metric="revenue@2026 FY", value=331839000000.0),
+            ]
+        )
+        assert any(e.derived and e.kind == "absolute" and abs(e.value - 50115000000.0) < 1.0 for e in index)
+
+    def test_a_change_and_a_growth_rate_are_both_available_for_the_same_pair(self):
+        index = build_evidence_index(
+            [
+                _finding("rd", metric="rd_expense@2025 FY", value=32488000000.0),
+                _finding("rd", metric="rd_expense@2026 FY", value=35562000000.0),
+            ]
+        )
+        assert any(e.derived and e.kind == "absolute" and abs(e.value - 3074000000.0) < 1.0 for e in index)
+        assert any(e.derived and e.kind == "percent" and abs(e.value - 9.4620) < 0.01 for e in index)
+
+    def test_a_change_from_a_zero_baseline_is_still_derivable(self):
+        # Growth is undefined against zero, but the change is not. The old code
+        # skipped the pair entirely on a falsy baseline.
+        index = build_evidence_index(
+            [
+                _finding("rd", metric="rd_expense@2025 FY", value=0.0),
+                _finding("rd", metric="rd_expense@2026 FY", value=500.0),
+            ]
+        )
+        assert any(e.derived and e.kind == "absolute" and abs(e.value - 500.0) < 1e-9 for e in index)
+
     def test_derived_evidence_inherits_both_operands_citations(self):
         index = build_evidence_index(
             [
