@@ -8,12 +8,23 @@
 # ══════════════════════════════════════════════════
 
 # ── Orchestration (PIN ALL — this family moves fast) ──
-langgraph==0.6.7
-langgraph-checkpoint-sqlite==2.0.11
-langchain-core==0.3.78
-langchain-google-genai==2.1.12
-langchain-text-splitters==0.3.11
-langsmith==0.4.33
+# Resolved as a coherent set on the langchain-core 1.x line. Do not bump these
+# individually: installing one at a time silently drags langchain-core with it
+# and leaves langgraph on an untested pairing. Re-resolve all six together.
+langgraph==1.2.10
+langgraph-checkpoint-sqlite==3.1.1
+langchain-core==1.5.3
+langchain-text-splitters==1.1.2
+langsmith==0.10.15
+
+# ── LLM provider: Gemini ──────────────────────────
+# ONE package reaches both backends via the unified google-genai SDK; which is
+# used is chosen by GEMINI_BACKEND and applied in src/core/llm.py:
+#   vertex   -> vertexai=True + ADC, billed per token
+#   aistudio -> GOOGLE_API_KEY, free tier / RPM-metered
+# NOT langchain-google-vertexai: its ChatVertexAI is deprecated in favour of
+# ChatGoogleGenerativeAI, and installing it drags in google-cloud-aiplatform.
+langchain-google-genai==4.3.2
 
 # ── Vector store & embeddings ─────────────────────
 # qdrant-client must track the pinned server (v1.17.1). fastembed's ONNX model

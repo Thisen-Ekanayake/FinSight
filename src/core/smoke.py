@@ -21,6 +21,9 @@ import sys
 from src.core.config import (
     EMBEDDING_MODEL,
     ENVIRONMENT,
+    GCP_LOCATION,
+    GCP_PROJECT,
+    GEMINI_BACKEND,
     GEMINI_MODEL_FLASH,
     GEMINI_RPM,
     LANGSMITH_PROJECT,
@@ -41,6 +44,9 @@ def check_config() -> bool:
     """Print resolved configuration. Never fails — this is orientation."""
     print("── Configuration " + "─" * 45)
     print(f"  environment      {ENVIRONMENT}")
+    print(f"  llm backend      {GEMINI_BACKEND}")
+    if GEMINI_BACKEND == "vertex":
+        print(f"  gcp project      {GCP_PROJECT} ({GCP_LOCATION})")
     print(f"  gemini (flash)   {GEMINI_MODEL_FLASH}  @ {GEMINI_RPM['flash']} req/min")
     print(f"  embeddings       {EMBEDDING_MODEL}")
     print(f"  qdrant           {QDRANT_URL}")

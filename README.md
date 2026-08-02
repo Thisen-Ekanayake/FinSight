@@ -71,12 +71,26 @@ START → load_watchlist ──(Send: batched price/macro, per-ticker filings/ne
 
 ```bash
 make venv && make install     # uv venv (Python 3.12) + deps
-cp .env.example .env          # then fill in your keys — see docs/api_keys.md
+cp .env.example .env          # then fill in — see docs/api_keys.md
+gcloud auth application-default login   # if using GEMINI_BACKEND=vertex
 make qdrant                   # FinSight's own Qdrant on :6335
 make qdrant-check             # verify isolation
 make smoke                    # one traced Gemini call → LangSmith run URL
-make test                     # unit tests (no network, no LLM quota)
+make test                     # unit tests (no network, no LLM spend)
 ```
+
+### Gemini backends
+
+`GEMINI_BACKEND` picks how Gemini is reached; `get_llm()` hides the difference from every caller.
+
+| | `vertex` | `aistudio` |
+|---|---|---|
+| Auth | Application Default Credentials — **no key in `.env`** | `GOOGLE_API_KEY` |
+| Cost | billed per token, no free tier | free |
+| Limit | high quota | requests/minute, `429` on excess |
+| `GEMINI_RPM_*` acts as | a **cost** guard | a **quota** guard |
+
+Either way a shared per-tier rate limiter throttles *every* call, including the concurrent `Send()` branches that would otherwise all fire at once.
 
 ### ⚠️ Qdrant isolation
 

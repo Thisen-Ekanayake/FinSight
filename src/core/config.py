@@ -42,7 +42,23 @@ def _resolve(path_str: str) -> Path:
 
 
 # ── LLM: Google Gemini ──────────────────────────────────
+# Two ways to reach Gemini, selected by GEMINI_BACKEND:
+#
+#   "vertex"   -> Vertex AI via Application Default Credentials (gcloud auth
+#                 application-default login). Needs a GCP project with
+#                 aiplatform.googleapis.com enabled. BILLED PER TOKEN.
+#   "aistudio" -> Google AI Studio via a GOOGLE_API_KEY. Free tier, but
+#                 metered in requests-per-minute.
+#
+# Both go through get_llm() in src/core/llm.py, so nothing downstream cares.
+GEMINI_BACKEND: str = os.getenv("GEMINI_BACKEND", "vertex").lower()
+
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+
+# Vertex AI targeting. GOOGLE_CLOUD_PROJECT is the conventional name and is
+# what the google-auth libraries themselves look for.
+GCP_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "") or os.getenv("GCP_PROJECT", "")
+GCP_LOCATION: str = os.getenv("GOOGLE_CLOUD_LOCATION", "") or os.getenv("GCP_LOCATION", "us-central1")
 
 ModelTier = Literal["flash", "pro"]
 
@@ -52,13 +68,18 @@ GEMINI_TEMPERATURE: float = float(os.getenv("GEMINI_TEMPERATURE", "0.1"))
 GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "4096"))
 GEMINI_MAX_RETRIES: int = int(os.getenv("GEMINI_MAX_RETRIES", "5"))
 
-# Free-tier Gemini limits requests-per-minute, not spend. These drive the
-# per-tier rate limiters in src/core/llm.py. Set them to ~80% of your actual
-# quota (https://ai.google.dev/gemini-api/docs/rate-limits) so bursts have
-# headroom. Exceeding the quota surfaces as 429s, not as a bill.
+# Drives the per-tier rate limiters in src/core/llm.py.
+#
+# On "aistudio" this is a QUOTA guard: the free tier meters requests-per-minute
+# and exceeding it surfaces as 429s. Set to ~80% of your real quota
+# (https://ai.google.dev/gemini-api/docs/rate-limits).
+#
+# On "vertex" it is a COST guard instead: Vertex bills per token with no free
+# tier, and quota is high enough that nothing stops a runaway fan-out from
+# spending real money. The limiter is the throttle. Raise deliberately.
 GEMINI_RPM: dict[str, int] = {
-    "flash": int(os.getenv("GEMINI_RPM_FLASH", "10")),
-    "pro": int(os.getenv("GEMINI_RPM_PRO", "4")),
+    "flash": int(os.getenv("GEMINI_RPM_FLASH", "30")),
+    "pro": int(os.getenv("GEMINI_RPM_PRO", "10")),
 }
 
 MODEL_BY_TIER: dict[str, str] = {
@@ -127,6 +148,45 @@ def require_key(name: str) -> str:
             f"(see docs/api_keys.md for where to get each key)."
         )
     return value
+
+
+def validate_llm_credentials() -> None:
+    """
+    Check that whichever Gemini backend is selected can actually authenticate.
+
+    Fails fast with an actionable message rather than letting a 401 surface
+    from deep inside a graph run.
+
+    Raises
+    ------
+    ConfigurationError
+        If GEMINI_BACKEND is not a known value.
+    MissingCredentialError
+        If the selected backend's credentials are absent.
+    """
+    from src.core.errors import ConfigurationError, MissingCredentialError
+
+    if GEMINI_BACKEND == "aistudio":
+        require_key("GOOGLE_API_KEY")
+        return
+
+    if GEMINI_BACKEND != "vertex":
+        raise ConfigurationError(f"GEMINI_BACKEND must be 'vertex' or 'aistudio', got {GEMINI_BACKEND!r}")
+
+    if not GCP_PROJECT:
+        raise MissingCredentialError(
+            "GEMINI_BACKEND=vertex but no GCP project is set.\n"
+            "  Set GOOGLE_CLOUD_PROJECT in .env (see docs/api_keys.md)."
+        )
+
+    adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+    explicit = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if not explicit and not adc_path.is_file():
+        raise MissingCredentialError(
+            "GEMINI_BACKEND=vertex but no Application Default Credentials found.\n"
+            "  Run:  gcloud auth application-default login\n"
+            "  Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path."
+        )
 
 
 def ensure_data_dirs() -> None:

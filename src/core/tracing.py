@@ -150,7 +150,8 @@ def get_run_url(run: object) -> str | None:
         # get_run_url needs the run object; accept an id for convenience.
         if isinstance(run, (str, UUID)):
             run = client.read_run(run_id=str(run))
-        return client.get_run_url(run=run)  # type: ignore[arg-type]
+        url: str = client.get_run_url(run=run)  # type: ignore[arg-type]
+        return url
     except Exception as exc:  # pragma: no cover - network dependent
         logger.warning("Could not resolve LangSmith run URL: %s", exc)
         return None
