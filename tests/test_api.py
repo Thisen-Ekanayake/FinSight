@@ -374,3 +374,190 @@ class TestAdmin:
         body = json.dumps(client.get("/admin/config").json()).lower()
         for forbidden in ("api_key", "apikey", "secret", "token", "credential", "password"):
             assert forbidden not in body
+
+
+# ═══════════════════════════════════════════════════════
+# Monitoring (Phase 6)
+# ═══════════════════════════════════════════════════════
+
+
+def _alert(**overrides: Any) -> dict[str, Any]:
+    alert = {
+        "alert_id": "11111111-2222-3333-4444-555555555555",
+        "ticker": "AAPL",
+        "company_name": "Apple Inc.",
+        "alert_type": "NEW_FILING",
+        "severity": "HIGH",
+        "status": "FIRED",
+        "headline": "AAPL filed an 8-K: non-reliance on previously issued financial statements",
+        "detail": "8-K filed 2026-08-03; carrying Item 4.02.",
+        "canonical_text": "AAPL Apple Inc. | NEW_FILING | auditor flagged non-reliance",
+        "dedup_key": "abc123",
+        "metrics": {"form_type": "8-K", "items": ["4.02"]},
+        "evidence": [
+            {
+                "source_type": "EDGAR",
+                "source_id": "0000320193-26-000010",
+                "url": "https://sec.gov/x",
+                "as_of": "2026-08-03",
+                "excerpt": None,
+            }
+        ],
+        "occurrence_count": 1,
+        "first_seen_at": "2026-08-03T12:00:00+00:00",
+        "last_seen_at": "2026-08-03T12:00:00+00:00",
+        "fired_at": "2026-08-03T12:00:00+00:00",
+        "parent_alert_id": None,
+    }
+    alert.update(overrides)
+    return alert
+
+
+class TestWatchlistRoutes:
+    def test_add_then_list(self, client):
+        with patch("src.data.edgar.resolve_company_name", return_value="Tesla, Inc."):
+            created = client.post("/watchlist", json={"ticker": "tsla"})
+
+        assert created.status_code == 201
+        assert created.json()["ticker"] == "TSLA"
+
+        listed = client.get("/watchlist").json()
+        assert [row["ticker"] for row in listed] == ["TSLA"]
+
+    def test_adding_twice_is_idempotent(self, client):
+        with patch("src.data.edgar.resolve_company_name", return_value="Apple Inc."):
+            client.post("/watchlist", json={"ticker": "AAPL"})
+            client.post("/watchlist", json={"ticker": "AAPL"})
+
+        assert len(client.get("/watchlist").json()) == 1
+
+    def test_delete_is_a_soft_delete(self, client):
+        """
+        Hard-deleting would drop the MonitorCheckpoint rows, and re-adding the
+        ticker would then report its entire filing history as new.
+        """
+        with patch("src.data.edgar.resolve_company_name", return_value="Apple Inc."):
+            client.post("/watchlist", json={"ticker": "AAPL"})
+
+        assert client.delete("/watchlist/AAPL").status_code == 204
+        assert client.get("/watchlist").json() == []
+        assert len(client.get("/watchlist", params={"include_inactive": True}).json()) == 1
+
+    def test_deleting_an_unwatched_ticker_is_404(self, client):
+        assert client.delete("/watchlist/NOPE").status_code == 404
+
+    def test_watermarks_are_reported_per_monitor(self, client):
+        from src.persistence.repository import set_checkpoint
+
+        with patch("src.data.edgar.resolve_company_name", return_value="Apple Inc."):
+            client.post("/watchlist", json={"ticker": "AAPL"})
+        set_checkpoint("AAPL", "filing")
+
+        row = client.get("/watchlist").json()[0]
+        assert "filing" in row["last_checked"]
+        assert "news" not in row["last_checked"]  # never checked is ABSENT, not zero
+
+
+class TestMonitorRoutes:
+    def test_running_a_cycle_reports_what_it_suppressed(self, client):
+        """
+        The suppressions are part of the response, not hidden. A dedup engine
+        whose decisions are invisible is indistinguishable from one dropping
+        alerts through a bug.
+        """
+        state = {
+            "cycle_id": "20260803T120000Z-abcd1234",
+            "warmup": False,
+            "candidates": [{}, {}, {}],
+            "fired": [_alert()],
+            "merged": [],
+            "suppressed": [
+                {
+                    "ticker": "AAPL",
+                    "alert_type": "NEWS_SENTIMENT",
+                    "headline": "Second outlet, same story",
+                    "canonical_text": "c",
+                    "parent_alert_id": "p1",
+                    "parent_headline": "First outlet",
+                    "score": 0.942,
+                    "reason": "semantic duplicate",
+                }
+            ],
+            "monitor_errors": [],
+            "watchlist": [],
+        }
+
+        with patch("src.monitor.graph.run_cycle", return_value=state):
+            body = client.post("/monitor/cycles", json={"warmup": False}).json()
+
+        assert body["candidate_count"] == 3
+        assert len(body["fired"]) == 1
+        assert body["suppressed"][0]["score"] == 0.942
+        assert body["suppressed"][0]["parent_headline"] == "First outlet"
+
+    def test_a_warmup_cycle_is_flagged(self, client):
+        state = {"cycle_id": "c1", "warmup": True, "candidates": [], "fired": [], "merged": [], "suppressed": []}
+
+        with patch("src.monitor.graph.run_cycle", return_value=state):
+            body = client.post("/monitor/cycles", json={"warmup": True}).json()
+
+        assert body["warmup"] is True
+        assert body["fired"] == []
+
+    def test_a_failing_cycle_is_a_500_not_a_hang(self, client):
+        with patch("src.monitor.graph.run_cycle", side_effect=RuntimeError("qdrant down")):
+            response = client.post("/monitor/cycles", json={})
+
+        assert response.status_code == 500
+        assert "qdrant down" in response.json()["detail"]
+
+    def test_alerts_are_listed_and_filterable(self, client):
+        from src.persistence.repository import record_alert
+
+        record_alert(_alert(alert_id="a1", ticker="AAPL", severity="HIGH"), cycle_id="c1")
+        record_alert(_alert(alert_id="a2", ticker="MSFT", severity="LOW"), cycle_id="c1")
+
+        assert len(client.get("/monitor/alerts").json()) == 2
+        assert len(client.get("/monitor/alerts", params={"ticker": "AAPL"}).json()) == 1
+        assert len(client.get("/monitor/alerts", params={"severity": "high"}).json()) == 1
+
+    def test_an_alert_carries_its_evidence(self, client):
+        from src.persistence.repository import record_alert
+
+        record_alert(_alert(alert_id="a1"), cycle_id="c1")
+        body = client.get("/monitor/alerts/a1").json()
+
+        assert body["evidence"][0]["source_id"] == "0000320193-26-000010"
+        assert body["severity"] == "HIGH"
+
+    def test_an_unknown_alert_is_404(self, client):
+        assert client.get("/monitor/alerts/ghost").status_code == 404
+
+    def test_decisions_include_the_fires_not_only_the_suppressions(self, client):
+        """
+        Phase 7's threshold sweep needs negatives. A log of only suppressions
+        can justify the threshold that produced it and nothing else.
+        """
+        from src.persistence.repository import record_dedup_decisions
+
+        record_dedup_decisions(
+            [
+                {"ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "decision": "FIRE", "score": 0.0},
+                {"ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "decision": "SUPPRESS_SEMANTIC", "score": 0.94},
+            ],
+            cycle_id="c1",
+        )
+
+        body = client.get("/monitor/decisions").json()
+        assert {row["decision"] for row in body} == {"FIRE", "SUPPRESS_SEMANTIC"}
+
+    def test_cycles_are_listed_newest_first(self, client):
+        from src.persistence.repository import record_cycle
+
+        record_cycle({"cycle_id": "c1", "started_at": "2026-08-01T00:00:00+00:00", "watchlist": []}, duration_ms=1)
+        record_cycle({"cycle_id": "c2", "started_at": "2026-08-03T00:00:00+00:00", "watchlist": []}, duration_ms=2)
+
+        assert [row["cycle_id"] for row in client.get("/monitor/cycles").json()] == ["c2", "c1"]
+
+    def test_an_unknown_cycle_is_404(self, client):
+        assert client.get("/monitor/cycles/nope").status_code == 404
