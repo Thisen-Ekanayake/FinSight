@@ -38,6 +38,8 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Iterator, NamedTuple
 
+from src.vectorstore.config import COLLECTION_FILINGS_ABLATION
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +57,49 @@ class Variant(NamedTuple):
     description: str
     hypothesis: str
     patches: tuple[Patch, ...]
+    # Checked before the patches are applied. Only needed when a variant
+    # depends on state outside the process — see require_ablation_corpus.
+    precondition: Any = None
+
+
+def require_ablation_corpus() -> None:
+    """
+    Refuse to run the header ablation against a missing or partial index.
+
+    An empty collection does not error. Retrieval simply returns nothing, the
+    filings specialist contributes no findings, and the narrative archetype
+    collapses — which reads exactly like a dramatic confirmation that
+    contextual headers matter enormously.
+
+    That is the most dangerous shape of failure in this whole suite: a broken
+    setup and a real effect produce the same numbers. So parity is asserted,
+    not assumed.
+
+    Raises
+    ------
+    RuntimeError
+        If the ablation collection is absent, or holds a different number of
+        points than production. Same corpus, same chunking, same payloads —
+        only the vectors may differ.
+    """
+    from src.vectorstore.collections import collection_stats
+    from src.vectorstore.config import COLLECTION_FILINGS
+
+    production = collection_stats(COLLECTION_FILINGS)
+    ablation = collection_stats(COLLECTION_FILINGS_ABLATION)
+
+    if not ablation["exists"]:
+        raise RuntimeError(
+            f"{COLLECTION_FILINGS_ABLATION} does not exist. Build it first:\n"
+            "  .venv/bin/python -m src.vectorstore.ingest --watchlist --limit 4 --no-headers"
+        )
+
+    if ablation["points"] != production["points"]:
+        raise RuntimeError(
+            f"Corpus mismatch: {COLLECTION_FILINGS} has {production['points']:,} points, "
+            f"{COLLECTION_FILINGS_ABLATION} has {ablation['points']:,}. An ablation over a different "
+            "corpus measures the corpus, not the header."
+        )
 
 
 # ── The tightened synthesis prompt ──────────────────────
@@ -116,6 +161,18 @@ VARIANTS: dict[str, Variant] = {
         ),
         patches=(Patch("src.research.agents.filings_rag", "FILINGS_TOP_K", 12),),
     ),
+    "no-headers": Variant(
+        description="Filing retrieval reads an index built WITHOUT contextual chunk headers.",
+        hypothesis=(
+            "A bare chunk loses both its entity and its section — 'we face intense competition' is nearly "
+            "meaningless without knowing it is Apple's Risk Factors — so removing the header should degrade "
+            "retrieval and show up as lower answer_correctness on the narrative archetype. This is the only "
+            "ablation here that measures a decision already made rather than proposing a new one: if the "
+            "metrics do not move, the header is costing ingest complexity for nothing."
+        ),
+        patches=(Patch("src.research.agents.filings_rag", "SEARCH_COLLECTION", COLLECTION_FILINGS_ABLATION),),
+        precondition=require_ablation_corpus,
+    ),
     "pro-router": Variant(
         description="Routing runs on gemini-2.5-pro instead of gemini-2.5-flash.",
         hypothesis=(
@@ -158,9 +215,18 @@ def apply_variant(name: str) -> Iterator[Variant]:
     ValueError
         The attribute already equals the target value, so the experiment would
         measure nothing while appearing to work. Louder than a silent no-op.
+    RuntimeError
+        The variant's precondition failed — see require_ablation_corpus.
     """
     variant = VARIANTS[name]
     restore: list[tuple[Any, str, Any]] = []
+
+    # Before anything is patched: a variant depending on external state must
+    # prove that state is there. A missing ablation index does not error, it
+    # just returns nothing — and "no retrieval" looks identical to "the change
+    # had an enormous effect".
+    if variant.precondition is not None:
+        variant.precondition()
 
     try:
         for patch in variant.patches:

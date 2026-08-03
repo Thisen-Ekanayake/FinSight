@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -27,10 +28,14 @@ from evals.evaluators import all_evaluators
 from evals.evaluators.citation import answer_groundedness, citation_coverage, source_validity
 from evals.evaluators.judge import answer_correctness, citation_faithfulness
 from evals.evaluators.numeric import numeric_accuracy, refusal_correctness
-from evals.variants import VARIANTS, apply_variant
+from evals.variants import VARIANTS, Patch, apply_variant
 from src.core.schemas import AgentFinding, Citation
 
 ACCESSION = "0000320193-25-000079"
+
+
+def _raise() -> None:
+    raise RuntimeError("precondition failed")
 
 
 def _citation(source_id: str = ACCESSION) -> Citation:
@@ -339,6 +344,57 @@ def test_patching_a_value_that_is_already_set_raises_rather_than_measuring_nothi
         filings_rag.FILINGS_TOP_K = 8
 
 
+def test_the_header_ablation_refuses_to_run_without_its_index():
+    # The dangerous shape: a missing collection does not error, retrieval just
+    # returns nothing, the narrative archetype collapses — and that reads
+    # exactly like a dramatic confirmation that contextual headers matter.
+    # A broken setup and a real effect produce the same numbers.
+    from evals import variants
+
+    missing = {"name": "x", "exists": False, "points": 0, "vectors": 0, "indexed_fields": [], "status": "missing"}
+    with patch("src.vectorstore.collections.collection_stats", return_value=missing):
+        with pytest.raises(RuntimeError, match="does not exist"):
+            variants.require_ablation_corpus()
+
+
+def test_the_header_ablation_refuses_to_run_on_a_different_corpus():
+    from evals import variants
+
+    def stats(name: str) -> dict:
+        points = 2022 if name.endswith("filings") else 1500
+        return {"name": name, "exists": True, "points": points, "vectors": points, "indexed_fields": [], "status": "ok"}
+
+    with patch("src.vectorstore.collections.collection_stats", side_effect=stats):
+        with pytest.raises(RuntimeError, match="Corpus mismatch"):
+            variants.require_ablation_corpus()
+
+
+def test_matching_corpora_pass_the_ablation_precondition():
+    from evals import variants
+
+    def stats(name: str) -> dict:
+        return {"name": name, "exists": True, "points": 2022, "vectors": 2022, "indexed_fields": [], "status": "ok"}
+
+    with patch("src.vectorstore.collections.collection_stats", side_effect=stats):
+        variants.require_ablation_corpus()
+
+
+def test_a_precondition_runs_before_any_patch_is_applied():
+    # If it ran after, a failing precondition would leave the process patched.
+    from evals import variants
+    from src.research.agents import filings_rag
+
+    baseline = filings_rag.SEARCH_COLLECTION
+    boom = variants.Variant("d", "h", (Patch("src.research.agents.filings_rag", "SEARCH_COLLECTION", "other"),), _raise)
+
+    with patch.dict(variants.VARIANTS, {"boom": boom}):
+        with pytest.raises(RuntimeError, match="precondition failed"):
+            with variants.apply_variant("boom"):
+                pass
+
+    assert filings_rag.SEARCH_COLLECTION == baseline
+
+
 def test_every_variant_targets_an_attribute_that_actually_exists():
     # The silent failure this guards against: patching the config module
     # instead of its consumer runs the experiment, reports a number, and the
@@ -346,9 +402,9 @@ def test_every_variant_targets_an_attribute_that_actually_exists():
     import importlib
 
     for name, variant in VARIANTS.items():
-        for patch in variant.patches:
-            module = importlib.import_module(patch.module)
-            assert hasattr(module, patch.attribute), f"{name}: {patch.module} has no {patch.attribute}"
+        for target in variant.patches:
+            module = importlib.import_module(target.module)
+            assert hasattr(module, target.attribute), f"{name}: {target.module} has no {target.attribute}"
 
 
 def test_every_variant_changes_exactly_one_thing():
