@@ -9,15 +9,16 @@ Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith**
 ## Measured, not asserted
 
 Every number in an answer is supposed to trace back to a primary source. Phase 5
-turned that claim into a metric — and the metric immediately found four bugs
-that 485 unit tests had not.
+turned that claim into a metric — and the metric found four bugs that 485 unit
+tests had not.
 
-| | `p5-baseline` | `p5-bugfix` | `p5-strict-src` |
-|---|---|---|---|
-| citation coverage ★ | 0.973 | **0.997** | 0.994 |
-| **numeric accuracy** (vs SEC XBRL) | **0.725** | **0.957** | 0.935 |
-| answer correctness | 0.688 | 0.825 | **0.838** |
-| citation faithfulness | 0.794 | **0.800** | 0.771 |
+| | `p5-baseline` | **`p5-bugfix`** ✅ | `p5-strict-src` | `p5-k12` | `p5-pro-router` |
+|---|---|---|---|---|---|
+| citation coverage ★ | 0.973 | **0.997** | 0.994 | 0.992 | 0.996 |
+| **numeric accuracy** (vs SEC XBRL) | **0.725** | **0.957** | 0.935 | 0.935 | 0.935 |
+| answer correctness | 0.700 | 0.800 | 0.825 | **0.875** | 0.825 |
+| citation faithfulness | 0.971 | **0.986** | 0.986 | 0.973 | 0.986 |
+| refusal correctness | 0.750 | **0.812** | 0.812 | 0.562 | 0.750 |
 
 Coverage read **0.973** at baseline — a system that looks like it works.
 Ground-truth accuracy read **0.725**, because the answers were citing real
@@ -30,7 +31,16 @@ A: NVIDIA reported revenue of $26.914 billion [SRC:EDGAR:0001045810-...]
 ```
 
 The citation is genuine, so no citation check can catch it. Only ground truth
-can. Full write-up, including a **refuted** hypothesis: [`docs/eval_results.md`](./docs/eval_results.md).
+can.
+
+Three tuning variants were then tested and **none was adopted**: one bought
+nothing, one traded better answers for worse refusals, and one bought nothing
+for +31% latency. A fourth finding was a defect in the *evaluator* — a
+400-character cap was truncating every filing chunk before the LLM judge saw it,
+so an archetype that scores **1.000** had been reading 0.375 for three
+experiments.
+
+Full write-up: [`docs/eval_results.md`](./docs/eval_results.md).
 
 ---
 
@@ -120,6 +130,11 @@ make test                     # unit tests (no network, no LLM spend)
 make evals                    # baseline over all 40 golden questions
 make evals V=k12              # one named single-variable experiment
 make evals-check              # is the committed golden dataset current?
+
+# Changed an evaluator rather than the system? Re-score stored runs instead of
+# paying for the graph again — the target outputs are identical, so any
+# movement is attributable to the measurement.
+./run_evals.sh research --regrade p5-bugfix-baseline-b45b642c
 ```
 
 An eval run is the largest quota spike in this project — ~320 LLM calls in one
