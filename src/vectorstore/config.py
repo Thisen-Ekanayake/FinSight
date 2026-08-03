@@ -188,9 +188,34 @@ DEFAULT_SEARCH_LIMIT: int = 8
 TAU_HIGH: float = 0.89  # >= this  -> SUPPRESS as duplicate
 TAU_LOW: float = 0.78  # in [LOW, HIGH) -> MERGE as same event, new information
 
-# Never suppress a HIGH-severity alert below this similarity, whatever the
-# thresholds say. Missing a real HIGH event costs far more than a duplicate ping.
-TAU_HIGH_SEVERITY_FORCE_FIRE: float = 0.96
+# ══ THE HIGH-SEVERITY GUARDRAIL IS NOT A SIMILARITY FLOOR ══
+#   The plan specified one: "never suppress a HIGH alert below 0.96 similarity,
+#   whatever the thresholds say". It was a prior, not a measurement, and the
+#   first live run of the semantic path refuted it.
+#
+#   Three outlets covering one DOJ probe of Apple, canonicalized and embedded
+#   for real, scored 0.898 and 0.913 against the first report. Both are
+#   comfortably above TAU_HIGH and both sit far below 0.96 — so a 0.96 floor
+#   does not protect against a missed event, it guarantees ONE PAGE PER OUTLET
+#   for every HIGH-severity story. That is precisely the noise the engine
+#   exists to remove, and an alert stream nobody reads has a false-negative
+#   rate of 100%.
+#
+#   Any floor high enough to be a meaningful extra margin also sits above the
+#   band where genuine paraphrases live, so the whole idea is unworkable here.
+#
+#   What replaced it is a rule about INFORMATION rather than similarity:
+#
+#       A HIGH candidate fires unless the matched parent already represents a
+#       reported event of HIGH severity.
+#
+#   The guarantee the guardrail was reaching for is "the reader learns about
+#   this HIGH event". If the parent was HIGH and fired, they already did. If
+#   the parent was MED or LOW, they were told a milder version and the
+#   escalation must reach them — which it does, either as an ESCALATE in the
+#   merge band or as a forced FIRE in the suppress band.
+#
+#   See src/monitor/dedup.py and docs/dedup_algorithm.md.
 
 # The right dedup horizon is a property of the underlying event's natural
 # frequency, not a global constant.

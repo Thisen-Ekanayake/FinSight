@@ -29,8 +29,8 @@
 #        s >= TAU_HIGH             SUPPRESS  — same event, nothing new
 #        TAU_LOW <= s < TAU_HIGH   MERGE     — same event, new information
 #        s <  TAU_LOW  / no hits   FIRE      — new event
-#   6. GUARDRAIL      a HIGH-severity candidate below TAU_HIGH_SEVERITY_FORCE_FIRE
-#                     fires regardless of what step 5 concluded.
+#   6. GUARDRAIL      a HIGH candidate whose matched parent is NOT already a
+#                     reported HIGH fires regardless of what step 5 concluded.
 #
 # ══ WHY THE MERGE BAND EXISTS AT ALL ══
 #   Two thresholds rather than one, because "is this the same event?" has three
@@ -63,7 +63,7 @@ from src.monitor.config import WARMUP_STATUS
 from src.monitor.severity import score as severity_score
 from src.monitor.state import Alert, CandidateAlert, DecisionRecord, SuppressionRecord
 from src.monitor.synthesizer import alert_id_for, build_alert, dedup_key, summarize
-from src.vectorstore.config import TAU_HIGH, TAU_HIGH_SEVERITY_FORCE_FIRE, TAU_LOW
+from src.vectorstore.config import TAU_HIGH, TAU_LOW
 
 logger = logging.getLogger(__name__)
 
@@ -268,21 +268,34 @@ def decide(
     # AND moves the cluster centroid — overriding it with a bare FIRE would
     # report the same thing while throwing all three away.
     #
+    # ══ AND IT GATES ON THE PARENT'S SEVERITY, NOT ON SIMILARITY ══
+    # The plan specified a similarity floor: never suppress a HIGH alert below
+    # 0.96, whatever the thresholds say. The first live run of the semantic
+    # path refuted it — three outlets on one DOJ probe scored 0.898 and 0.913,
+    # so a 0.96 floor does not prevent a missed event, it guarantees one page
+    # per outlet for every HIGH story. See src/vectorstore/config.py.
+    #
+    # The guarantee being reached for is "the reader learns about this HIGH
+    # event". If the parent was itself HIGH and fired, they already have.
+    #
     # Evaluated before step 5 runs so the override happens instead of the
     # merge's side effects, not on top of them.
+    parent_severity = str(best.get("severity", "LOW"))
+    parent_rank = _RANK.get(parent_severity, 0)
+
     if best_score >= TAU_HIGH:
         reports_nothing = True
     elif best_score >= TAU_LOW:
-        reports_nothing = _RANK.get(severity, 0) <= _RANK.get(str(best.get("severity", "LOW")), 0)
+        reports_nothing = _RANK.get(severity, 0) <= parent_rank
     else:
         # No neighbour worth considering — step 5 fires anyway, and calling
         # that a guardrail save would overstate what the rule did.
         reports_nothing = False
 
-    if reports_nothing and severity == "HIGH" and best_score < TAU_HIGH_SEVERITY_FORCE_FIRE:
+    if reports_nothing and severity == "HIGH" and parent_rank < _RANK["HIGH"]:
         reason = (
-            f"HIGH severity ({severity_reason}) at {best_score:.3f}, below the "
-            f"{TAU_HIGH_SEVERITY_FORCE_FIRE} force-fire floor"
+            f"HIGH severity ({severity_reason}) matched a {parent_severity} alert at {best_score:.3f} — "
+            "the reader has not been told about this at HIGH severity"
         )
         logger.info("FIRE (guardrail) %s %s @ %.3f", candidate["ticker"], candidate["alert_type"], best_score)
         return _fire(candidate, alert, vector, key, warmup, best_score, reason, severity)

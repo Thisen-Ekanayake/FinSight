@@ -34,7 +34,7 @@ import pytest
 from src.monitor import dedup as dedup_module
 from src.monitor.dedup import Decision, decide, deduplicate
 from src.monitor.synthesizer import alert_id_for, dedup_key
-from src.vectorstore.config import TAU_HIGH, TAU_HIGH_SEVERITY_FORCE_FIRE, TAU_LOW
+from src.vectorstore.config import TAU_HIGH, TAU_LOW
 
 NOW = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
 
@@ -301,16 +301,30 @@ class TestMergeBand:
 
 
 class TestHighSeverityGuardrail:
-    def test_a_high_alert_below_the_force_fire_floor_fires_anyway(self, store):
-        """
-        THE asymmetric-cost rule. Missing a real 8-K Item 4.02 because it read
-        like last week's costs far more than one duplicate ping.
-        """
-        store.next_score = TAU_HIGH + 0.01  # would normally SUPPRESS
-        assert store.next_score < TAU_HIGH_SEVERITY_FORCE_FIRE
+    """
+    ══ THE RULE IS ABOUT INFORMATION, NOT SIMILARITY ══
+    The plan specified a similarity floor — never suppress a HIGH alert below
+    0.96, whatever the thresholds say. The first live run of the semantic path
+    refuted it: three outlets on one DOJ probe scored 0.898 and 0.913, so a
+    0.96 floor guarantees one page per outlet for every HIGH story rather than
+    protecting against anything.
 
-        alarming = {"form_type": "8-K", "items": ["4.02"]}
-        decide(candidate(alert_type="NEW_FILING", natural_key="a", metrics=alarming), summary=SUMMARY, now=NOW)
+    What it means to be safe is that the READER LEARNS about the HIGH event.
+    If the matched parent was itself HIGH and fired, they already have.
+    """
+
+    def test_a_high_alert_matching_a_lower_severity_parent_fires(self, store):
+        """
+        The asymmetric-cost case. The reader was told a MED version; the event
+        is worse than they know, so suppressing it would leave them wrong.
+        """
+        store.next_score = TAU_HIGH + 0.01  # would otherwise SUPPRESS
+
+        routine = {"form_type": "10-K", "items": []}  # MED
+        alarming = {"form_type": "8-K", "items": ["4.02"]}  # HIGH
+
+        parent = decide(candidate(alert_type="NEW_FILING", natural_key="a", metrics=routine), summary=SUMMARY, now=NOW)
+        assert parent.alert["severity"] == "MED"
 
         outcome = decide(
             candidate(alert_type="NEW_FILING", natural_key="b", metrics=alarming),
@@ -318,12 +332,15 @@ class TestHighSeverityGuardrail:
             now=NOW,
         )
         assert outcome.decision == Decision.FIRE
-        assert "force-fire" in outcome.reason
+        assert "not been told about this at HIGH" in outcome.reason
 
-    def test_a_high_alert_above_the_force_fire_floor_is_still_suppressed(self, store):
-        # The guardrail is a floor, not a blanket exemption. At near-identity
-        # it really is the same alert, and firing it would be pure noise.
-        store.next_score = TAU_HIGH_SEVERITY_FORCE_FIRE + 0.01
+    def test_a_high_alert_matching_a_high_parent_is_suppressed(self, store):
+        """
+        THE case the 0.96 floor got wrong. Three outlets on one story score
+        0.90-ish against each other; the reader learned about it from the
+        first, so the second and third are noise.
+        """
+        store.next_score = TAU_HIGH + 0.01
         alarming = {"form_type": "8-K", "items": ["4.02"]}
 
         decide(candidate(alert_type="NEW_FILING", natural_key="a", metrics=alarming), summary=SUMMARY, now=NOW)
@@ -333,6 +350,36 @@ class TestHighSeverityGuardrail:
             now=NOW,
         )
         assert outcome.decision == Decision.SUPPRESS_SEMANTIC
+
+    def test_three_high_severity_outlets_produce_one_page(self, store):
+        # The end-to-end shape of the same rule, at the score real paraphrases
+        # were measured at.
+        store.next_score = 0.91
+        alarming = {"form_type": "8-K", "items": ["4.02"]}
+        candidates = [candidate(alert_type="NEW_FILING", natural_key=f"outlet-{i}", metrics=alarming) for i in range(3)]
+
+        outcomes = deduplicate(candidates, now=NOW, summaries=[SUMMARY] * 3)
+        assert [o.decision for o in outcomes] == [
+            Decision.FIRE,
+            Decision.SUPPRESS_SEMANTIC,
+            Decision.SUPPRESS_SEMANTIC,
+        ]
+
+    def test_a_high_alert_in_the_merge_band_escalates_rather_than_firing_bare(self, store):
+        # An escalating merge already reports AND links to its parent AND moves
+        # the centroid; a bare guardrail FIRE would report the same thing while
+        # discarding all three.
+        store.next_score = (TAU_LOW + TAU_HIGH) / 2
+        routine = {"form_type": "10-K", "items": []}
+        alarming = {"form_type": "8-K", "items": ["4.02"]}
+
+        decide(candidate(alert_type="NEW_FILING", natural_key="a", metrics=routine), summary=SUMMARY, now=NOW)
+        outcome = decide(
+            candidate(alert_type="NEW_FILING", natural_key="b", metrics=alarming),
+            summary=SUMMARY,
+            now=NOW,
+        )
+        assert outcome.decision == Decision.ESCALATE
 
     def test_the_guardrail_does_not_rescue_med_alerts(self, store):
         store.next_score = TAU_HIGH + 0.01
