@@ -12,7 +12,8 @@
 
 .PHONY: help venv install smoke qdrant qdrant-check dev build \
         test test-all test-cov lint type-check format \
-        api ingest research monitor evals evals-build evals-check logs clean clean-images
+        api ingest research monitor monitor-warmup watchlist decisions \
+        evals evals-build evals-check logs clean clean-images
 
 # ── Defaults ────────────────────────────────────
 PYTHON  ?= .venv/bin/python
@@ -41,8 +42,11 @@ help:
 	@echo "  format           Auto-format (black + isort)"
 	@echo ""
 	@echo "  ingest           EDGAR filings -> Qdrant"
-	@echo "  research         One-shot research query"
+	@echo "  monitor-warmup   FIRST RUN: index candidates, report nothing"
 	@echo "  monitor          One monitoring cycle"
+	@echo "  watchlist        What is watched, and when it was last checked"
+	@echo "  decisions        Every dedup decision, with its similarity score"
+	@echo "  research         One-shot research query"
 	@echo "  evals            Eval suite A  (make evals V=strict-src for a variant)"
 	@echo "  evals-check      Verify the committed golden dataset is current"
 	@echo ""
@@ -127,8 +131,24 @@ ingest:
 research:
 	./run_research.sh "$(Q)"
 
+# Run --warmup ONCE before the first real cycle. A cold dedup index has nothing
+# to match against, so cycle 1 would otherwise report every open filing, every
+# recent article, and every price move in one burst.
 monitor:
 	./run_monitor.sh --once
+
+monitor-warmup:
+	./run_monitor.sh --once --warmup
+
+# The watchlist, with each monitor's last-checked watermark.
+watchlist:
+	./run_monitor.sh --watchlist
+
+# Every dedup decision and the similarity score behind it. This is the table
+# Phase 7's threshold sweep is calibrated against — eyeballing it is how you
+# notice the bands have drifted before the sweep tells you so.
+decisions:
+	./run_monitor.sh --decisions
 
 # An eval run is the largest quota spike in this project; run_evals.sh prints
 # an estimate and waits for confirmation before spending anything.

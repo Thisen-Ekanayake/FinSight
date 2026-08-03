@@ -211,3 +211,121 @@ class ConfigOut(BaseModel):
     numeric_tolerance: float
     max_repair_attempts: int
     verify_qualitative_claims: bool
+
+
+# ── Monitoring (Phase 6) ────────────────────────────────
+class WatchItemOut(BaseModel):
+    """One watched ticker."""
+
+    ticker: str
+    company_name: str
+    warmed_up: bool
+    added_at: str
+    last_checked: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-monitor watermark, e.g. {'filing': '2026-08-03T09:31:00+00:00'}",
+    )
+
+
+class WatchItemRequest(BaseModel):
+    """Add a ticker to the watchlist."""
+
+    ticker: str = Field(min_length=1, max_length=16, description="US-listed symbol")
+    company_name: str = Field(default="", max_length=128, description="Resolved from EDGAR when omitted")
+
+
+class AlertOut(BaseModel):
+    """
+    One fired alert.
+
+    ``occurrence_count`` is how many times the event has been SEEN, not how
+    many times it was reported — the whole point of the dedup engine is that
+    those two numbers differ.
+    """
+
+    alert_id: str
+    cycle_id: str
+    ticker: str
+    alert_type: str
+    severity: str
+    status: str
+    headline: str
+    detail: str
+    canonical_text: str
+    occurrence_count: int
+    first_seen_at: str
+    last_seen_at: str
+    fired_at: str
+    parent_alert_id: str | None = None
+    evidence: list[CitationOut] = Field(default_factory=list)
+
+
+class SuppressionOut(BaseModel):
+    """
+    A candidate that was NOT reported, with the alert it collapsed into.
+
+    Exposed rather than hidden. A dedup engine whose decisions are invisible
+    is indistinguishable from one that is dropping alerts through a bug, and
+    this is the endpoint that tells the two apart.
+    """
+
+    ticker: str
+    alert_type: str
+    headline: str
+    parent_alert_id: str
+    parent_headline: str
+    score: float
+    reason: str
+
+
+class DedupDecisionOut(BaseModel):
+    """One dedup decision with the score behind it — the Phase 7 sweep's input."""
+
+    cycle_id: str
+    ticker: str
+    alert_type: str
+    severity: str
+    decision: str
+    reason: str
+    dedup_key: str
+    candidate_text: str
+    parent_alert_id: str | None = None
+    parent_text: str
+    score: float
+    decided_at: str
+
+
+class CycleOut(BaseModel):
+    """One monitoring cycle, summarised."""
+
+    cycle_id: str
+    warmup: bool
+    tickers: list[str]
+    candidate_count: int
+    fired_count: int
+    suppressed_count: int
+    merged_count: int
+    error_count: int
+    api_call_count: int
+    started_at: str
+    duration_ms: int
+
+
+class CycleRunRequest(BaseModel):
+    """Trigger one cycle on demand."""
+
+    warmup: bool = Field(default=False, description="Observe-only: index candidates, report nothing")
+    tickers: list[str] = Field(default_factory=list, description="Override the stored watchlist for this run")
+
+
+class CycleRunResponse(BaseModel):
+    """The outcome of one cycle, including what it chose not to tell you."""
+
+    cycle_id: str
+    warmup: bool
+    candidate_count: int
+    fired: list[AlertOut]
+    merged: list[AlertOut]
+    suppressed: list[SuppressionOut]
+    errors: list[str]
+    duration_ms: int

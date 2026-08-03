@@ -48,7 +48,7 @@ from src.research.graph import build_research_graph
 logger = logging.getLogger(__name__)
 
 API_TITLE = "FinSight"
-API_VERSION = "0.4.0"
+API_VERSION = "0.6.0"
 API_DESCRIPTION = """
 Multi-agent financial research with enforced citations.
 
@@ -57,8 +57,14 @@ parallel, merged with source-trust conflict resolution, and then **verified** �
 every number in the answer is matched against a value some tool actually
 returned before the answer is released.
 
+A second subsystem watches a ticker list on a schedule, scores what it finds
+by rule, and **deduplicates** it against everything already reported — so the
+same event covered by three outlets arrives once.
+
 * `POST /research/query` — ask a question
 * `GET /research/threads/{thread_id}` — replay the run's full audit trail
+* `POST /monitor/cycles` — run a monitoring cycle now
+* `GET /monitor/decisions` — every dedup decision, with the score behind it
 * `GET /admin/budgets` — daily API usage
 """
 
@@ -131,7 +137,9 @@ def create_app() -> FastAPI:
     FastAPI
     """
     from src.api.admin_routes import router as admin_router
+    from src.api.monitor_routes import router as monitor_router
     from src.api.research_routes import router as research_router
+    from src.api.watchlist_routes import router as watchlist_router
 
     app = FastAPI(
         title=API_TITLE,
@@ -151,6 +159,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(research_router)
+    app.include_router(watchlist_router)
+    app.include_router(monitor_router)
     app.include_router(admin_router)
     return app
 
