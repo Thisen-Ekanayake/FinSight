@@ -11,6 +11,7 @@
 #   PRICE_*, FILING_*, NEWS_*, MACRO_*        severity thresholds
 #   CANONICAL_SUMMARY_PROMPT_SYSTEM / _USER
 #   DEDUP_ACTIVE_STATUSES, WARMUP_STATUS, PENDING_APPROVAL_STATUS
+#   NOTIFICATION_SINKS, EMAIL_*, ALERTS_LOG_PATH_NAME   (Phase 7 dispatcher)
 #
 # ══ SEVERITY IS RULES, NOT LLM JUDGEMENT ══
 #   Only the one-line qualitative SUMMARY is generated. Severity itself is
@@ -238,3 +239,28 @@ in the same order.
 {events}
 
 Return exactly {count} description(s)."""
+
+
+# ── Dispatch (Phase 7) ──────────────────────────────────
+# Where a FIRED (or approved) alert is actually delivered. Comma-separated so
+# a deploy can run several at once — console and file need no configuration,
+# which is why they are the default.
+NOTIFICATION_SINKS: tuple[str, ...] = tuple(
+    s.strip().lower() for s in os.getenv("NOTIFICATION_SINKS", "console,file").split(",") if s.strip()
+)
+
+# Durable, greppable notification record independent of SQLite — a `tail -f`
+# story for a process nobody is watching interactively.
+ALERTS_LOG_PATH_NAME: str = "alerts.log"
+
+# Gmail SMTP via an app password. Off by default: NOTIFICATION_SINKS can list
+# "email" without EMAIL_ENABLED=true, and dispatch.py treats that as a sink
+# FAILURE rather than a silent no-op — a misconfigured sink that reported
+# success would let dispatch_alert claim an alert was delivered when it was
+# not, which is worse than a loud error in the log.
+EMAIL_ENABLED: bool = os.getenv("EMAIL_ENABLED", "false").lower() in {"1", "true", "yes"}
+EMAIL_FROM: str = os.getenv("EMAIL_FROM", "")
+EMAIL_TO: str = os.getenv("EMAIL_TO", "")
+EMAIL_APP_PASSWORD: str = os.getenv("EMAIL_APP_PASSWORD", "")
+EMAIL_SMTP_HOST: str = os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
+EMAIL_SMTP_PORT: int = int(os.getenv("EMAIL_SMTP_PORT", "465"))
