@@ -322,6 +322,50 @@ def run_experiment(
     return print_summary(f"{prefix}-{variant}", results, elapsed=time.monotonic() - started)
 
 
+def regrade(experiment: str, *, judges: bool = True, prefix: str = "p5-regrade") -> dict[str, float]:
+    """
+    Re-score a completed experiment's stored runs with the current evaluators.
+
+    LangSmith accepts an existing experiment as the target, in which case it
+    replays the runs it already has instead of calling the system again. That
+    makes this the correct tool for the specific case where THE EVALUATOR
+    changed and the system did not: the target outputs are byte-identical, so
+    any movement is attributable to the measurement and nothing else.
+
+    It is also roughly a tenth of the cost — only the judge calls are paid for,
+    not the graph underneath them.
+
+    Parameters
+    ----------
+    experiment : str
+        Name of a completed experiment, e.g. ``p5-bugfix-baseline-b45b642c``.
+    judges : bool, default True
+        Include the LLM judges. False makes this free.
+    prefix : str, default "p5-regrade"
+        Experiment name prefix for the new scores.
+
+    Returns
+    -------
+    dict
+        Mean score per feedback key.
+    """
+    from langsmith import Client, evaluate
+
+    # No experiment_prefix, description, or metadata: LangSmith rejects all
+    # three when the target is an existing experiment, because the new scores
+    # attach to the SAME experiment's runs rather than creating a new one.
+    # That is the behaviour we want — the runs are the constant.
+    started = time.monotonic()
+    results = evaluate(
+        experiment,
+        evaluators=all_evaluators(judges=judges),
+        max_concurrency=MAX_CONCURRENCY,
+        client=Client(),
+    )
+
+    return print_summary(f"{prefix} <- {experiment}", results, elapsed=time.monotonic() - started)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Sync the dataset and run one experiment."""
     from src.core.logging_setup import configure_logging
@@ -333,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-judges", action="store_true", help="deterministic evaluators only — free")
     parser.add_argument("--prefix", default="p5", help="experiment name prefix")
     parser.add_argument("--sync-only", action="store_true", help="push the dataset and stop")
+    parser.add_argument("--regrade", default="", help="re-score a completed experiment's stored runs")
     parser.add_argument("--yes", action="store_true", help="skip the spend confirmation")
     args = parser.parse_args(argv)
 
@@ -347,6 +392,12 @@ def main(argv: list[str] | None = None) -> int:
     sync_dataset()
     if args.sync_only:
         print(f"Dataset {DATASET_RESEARCH} synced.")
+        return 0
+
+    if args.regrade:
+        # No spend gate: replaying stored runs costs only the judge calls, and
+        # skipping the graph is roughly a tenth of a full experiment.
+        regrade(args.regrade, judges=not args.no_judges, prefix=args.prefix)
         return 0
 
     total = len(load_jsonl(GOLDEN_PATH))
