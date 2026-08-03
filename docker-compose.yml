@@ -38,30 +38,42 @@ services:
       retries: 5
       start_period: 10s
 
-  # ── Phases 4+ ────────────────────────────────
-  # api:
-  #   build: .
-  #   container_name: finsight-api
-  #   ports: ["8000:8000"]
-  #   env_file: .env
-  #   environment:
-  #     QDRANT_URL: http://qdrant:6333    # in-network: the container port, not 6335
-  #   depends_on:
-  #     qdrant:
-  #       condition: service_healthy
-  #   volumes:
-  #     - finsight-data:/app/data
-  #   restart: unless-stopped
+  api:
+    build: .
+    container_name: finsight-api
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      QDRANT_URL: http://qdrant:6333    # in-network: the container port, not the host's 6335
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - finsight-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  # ── Phase 8 ──────────────────────────────────
-  # ui:
-  #   build: .
-  #   container_name: finsight-ui
-  #   command: streamlit run src/ui/app.py --server.port 8501 --server.address 0.0.0.0
-  #   ports: ["8501:8501"]
-  #   env_file: .env
-  #   depends_on: [api]
-  #   restart: unless-stopped
+  # The dashboard is a separate container on purpose, not a second process in
+  # the api one — it is the thing that would move to a different host or a
+  # different origin first, and src/api/main.py's wide-open CORS already
+  # assumes exactly that split.
+  ui:
+    build: .
+    container_name: finsight-ui
+    command: ["streamlit", "run", "src/ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+    ports: ["8501:8501"]
+    env_file: .env
+    environment:
+      API_URL: http://api:8000          # in-network: the container port, not the host's 8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   finsight-qdrant:

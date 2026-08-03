@@ -1,0 +1,9 @@
+# Committed rather than left to each machine's default: a portfolio project
+# that might run on a public host should not phone home usage stats by
+# default, and shouldn't need an interactive "would you like to..." prompt
+# on first run in a container with no TTY.
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true

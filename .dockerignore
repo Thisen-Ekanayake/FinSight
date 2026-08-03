@@ -1,0 +1,29 @@
+# Mirrors .gitignore's spirit: nothing secret, nothing generated, nothing
+# that only makes sense on the machine that built it goes into the image.
+
+.git/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+
+.env
+*.env
+!.env.example
+
+tests/
+docs/
+evals/
+
+*.md
+!README.md

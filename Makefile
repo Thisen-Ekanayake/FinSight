@@ -12,7 +12,7 @@
 
 .PHONY: help venv install smoke qdrant qdrant-check dev build \
         test test-all test-cov lint type-check format \
-        api ingest research monitor monitor-warmup watchlist decisions pending \
+        api ui ingest research monitor monitor-warmup watchlist decisions pending \
         evals evals-build evals-check evals-alerts logs clean clean-images
 
 # ── Defaults ────────────────────────────────────
@@ -29,6 +29,7 @@ help:
 	@echo "  smoke            One traced Gemini call -> prints LangSmith run URL"
 	@echo ""
 	@echo "  api              Start the FastAPI server -> /docs"
+	@echo "  ui               Start the Streamlit dashboard -> :8501 (start api first)"
 	@echo "  qdrant           Start FinSight's isolated Qdrant on :6335"
 	@echo "  qdrant-check     Verify FinSight :6335 is up AND Athena :6333 is untouched"
 	@echo "  dev              Start the full stack (qdrant + api + ui)"
@@ -125,6 +126,9 @@ format:
 # ── Entrypoints ─────────────────────────────────
 api: .env
 	./run_api.sh
+
+ui: .env
+	./run_ui.sh
 
 ingest:
 	./run_ingest.sh
