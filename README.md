@@ -12,13 +12,13 @@ Every number in an answer is supposed to trace back to a primary source. Phase 5
 turned that claim into a metric — and the metric found four bugs that 485 unit
 tests had not.
 
-| | `p5-baseline` | **`p5-bugfix`** ✅ | `p5-strict-src` | `p5-k12` | `p5-pro-router` |
-|---|---|---|---|---|---|
-| citation coverage ★ | 0.973 | **0.997** | 0.994 | 0.992 | 0.996 |
-| **numeric accuracy** (vs SEC XBRL) | **0.725** | **0.957** | 0.935 | 0.935 | 0.935 |
-| answer correctness | 0.700 | 0.800 | 0.825 | **0.875** | 0.825 |
-| citation faithfulness | 0.971 | **0.986** | 0.986 | 0.973 | 0.986 |
-| refusal correctness | 0.750 | **0.812** | 0.812 | 0.562 | 0.750 |
+| | `baseline` | **`bugfix`** ✅ | `strict-src` | `k12` | `pro-router` | `no-headers` |
+|---|---|---|---|---|---|---|
+| citation coverage ★ | 0.973 | **0.997** | 0.994 | 0.992 | 0.996 | 0.995 |
+| **numeric accuracy** (vs SEC XBRL) | **0.725** | **0.957** | 0.935 | 0.935 | 0.935 | 0.935 |
+| answer correctness | 0.700 | 0.800 | 0.825 | **0.875** | 0.825 | 0.800 |
+| citation faithfulness | 0.971 | **0.986** | 0.986 | 0.973 | 0.986 | 0.973 |
+| refusal correctness | 0.750 | **0.812** | 0.812 | 0.562 | 0.750 | 0.688 |
 
 Coverage read **0.973** at baseline — a system that looks like it works.
 Ground-truth accuracy read **0.725**, because the answers were citing real
@@ -33,12 +33,14 @@ A: NVIDIA reported revenue of $26.914 billion [SRC:EDGAR:0001045810-...]
 The citation is genuine, so no citation check can catch it. Only ground truth
 can.
 
-Three tuning variants were then tested and **none was adopted**: one bought
-nothing, one traded better answers for worse refusals, and one bought nothing
-for +31% latency. A fourth finding was a defect in the *evaluator* — a
-400-character cap was truncating every filing chunk before the LLM judge saw it,
-so an archetype that scores **1.000** had been reading 0.375 for three
-experiments.
+Four variants were then tested and **none was adopted**: one bought nothing, one
+traded better answers for worse refusals, one bought nothing for +31% latency,
+and the contextual-header ablation changed 22% of retrieved chunks while
+changing the answer not at all.
+
+A fifth finding was a defect in the *evaluator* — a 400-character cap was
+truncating every filing chunk before the LLM judge saw it, so an archetype that
+scores **1.000** had been reading 0.375 for three experiments.
 
 Full write-up: [`docs/eval_results.md`](./docs/eval_results.md).
 
@@ -98,6 +100,7 @@ START → load_watchlist ──(Send: batched price/macro, per-ticker filings/ne
 - **Numbers come from XBRL; narrative comes from RAG.** A 10-K's financial tables become soup under HTML text extraction — which is exactly where hallucinated figures originate. The LLM is never asked to read a number out of a table. `data.sec.gov` XBRL facts give exact values *and* an accession number for free.
 - **Citation verification is deterministic first, LLM second.** A regex extracts every number from the draft answer and matches it against what the tools actually returned, within 0.5% tolerance. The LLM judge only rules on qualitative claims. An LLM checking its own arithmetic is circular.
 - **Grounding and accuracy are different metrics, and the gap between them is where the bugs live.** "Does this number match what a tool returned?" is a question the system answers with its own output — a stale tool passes it perfectly. So the eval suite scores answers against SEC XBRL as well, and that is the metric that moved: 0.725 → 0.957.
+- **Contextual chunk headers are kept, but they are not the win they were assumed to be.** Ablated against a twin index in Phase 5: they change 22% of retrieved chunks and change the answer not at all. Unfiltered they buy +0.02 on retrieving the right ticker, and in production they cannot matter for the entity at all, because `ticker` is a hard payload filter. Documented because a plausible, well-argued, unverified design decision is exactly what an eval suite is for.
 - **Alert dedup strips volatile numerics before embedding.** `"AAPL fell 5.2%"` and `"AAPL fell 5.4%"` are the same event; `"AAPL fell 5.2%"` and `"MSFT fell 5.2%"` are unrelated. So the embedded text is qualitative, and ticker/type are hard payload filters rather than soft semantic signals.
 - **Severity is deterministic rules, not LLM judgement.** An 8-K carrying Item 4.02 (non-reliance on previously issued financials) is automatically HIGH. This keeps severity testable and stops the model inflating urgency to seem useful.
 - **Conflicting sources are surfaced, not silently resolved.** Beyond a 1% tolerance the answer says which sources disagreed and which was used.

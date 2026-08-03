@@ -203,9 +203,27 @@ def contextual_header(chunk: FilingChunk) -> str:
     """
     Build the header prepended to a chunk BEFORE embedding.
 
-    A bare chunk loses both the entity and the section it came from — "we face
-    intense competition" is nearly meaningless without knowing it is Apple's
-    Risk Factors. Prepending this is cheap and a large retrieval-quality win.
+    The reasoning: a bare chunk loses both the entity and the section it came
+    from — "we face intense competition" is nearly meaningless without knowing
+    it is Apple's Risk Factors.
+
+    ══ MEASURED, AND SMALLER THAN THE REASONING SUGGESTS ══
+    Phase 5 ablated this against a twin index built without headers (see
+    docs/eval_results.md, p5-no-headers). It changes 22% of retrieved chunks
+    and the top-1 hit on a quarter of narrative questions, but end-to-end
+    answer quality is IDENTICAL — narrative answer_correctness 0.438 either
+    way, faithfulness 1.000 either way.
+
+    Two reasons. Unfiltered, the header buys +0.02 on retrieving the right
+    ticker and +0.02 on the right section: 1,200 characters of a company's own
+    prose is already a strong entity signal, so the header mostly restates what
+    the chunk says. And in production it cannot matter for the entity at all,
+    because search_filings passes `ticker` as a hard payload filter — on-ticker
+    is 1.000 by construction with or without this.
+
+    Kept because it costs one string concatenation at ingest and nothing at
+    query time, and may earn its place on a corpus with more entities than 20
+    filings. It is NOT the large retrieval win it was assumed to be.
 
     The header is NOT stored in the payload, so citations quote the real
     document text rather than a synthetic preamble.
