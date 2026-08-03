@@ -12,8 +12,8 @@
 
 .PHONY: help venv install smoke qdrant qdrant-check dev build \
         test test-all test-cov lint type-check format \
-        api ingest research monitor monitor-warmup watchlist decisions \
-        evals evals-build evals-check logs clean clean-images
+        api ingest research monitor monitor-warmup watchlist decisions pending \
+        evals evals-build evals-check evals-alerts logs clean clean-images
 
 # ── Defaults ────────────────────────────────────
 PYTHON  ?= .venv/bin/python
@@ -46,9 +46,11 @@ help:
 	@echo "  monitor          One monitoring cycle"
 	@echo "  watchlist        What is watched, and when it was last checked"
 	@echo "  decisions        Every dedup decision, with its similarity score"
+	@echo "  pending          Cycles paused on a HIGH alert, awaiting approval"
 	@echo "  research         One-shot research query"
 	@echo "  evals            Eval suite A  (make evals V=strict-src for a variant)"
 	@echo "  evals-check      Verify the committed golden dataset is current"
+	@echo "  evals-alerts     Eval suite B — the dedup TAU_HIGH threshold sweep"
 	@echo ""
 	@echo "  logs             Follow container logs"
 	@echo "  clean            Stop containers and remove volumes (GUARDED)"
@@ -150,6 +152,10 @@ watchlist:
 decisions:
 	./run_monitor.sh --decisions
 
+# Cycles paused on a HIGH alert, and what they are actually waiting on.
+pending:
+	./run_monitor.sh --pending
+
 # An eval run is the largest quota spike in this project; run_evals.sh prints
 # an estimate and waits for confirmation before spending anything.
 #   make evals                    baseline over all 40 examples
@@ -164,6 +170,11 @@ evals-build:
 
 evals-check:
 	./run_evals.sh check
+
+# Suite B: the dedup TAU_HIGH threshold sweep. Local bge-small only — no LLM
+# call, no confirmation prompt, safe to re-run any time the bands are in doubt.
+evals-alerts:
+	./run_evals.sh alerts
 
 # ── Container utilities ─────────────────────────
 logs:

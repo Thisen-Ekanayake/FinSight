@@ -4,7 +4,7 @@
 # ═══════════════════════════════════════════════════════
 #
 # Suite A (research citation faithfulness) is Phase 5.
-# Suite B (alert fire/suppress correctness) arrives in Phase 7.
+# Suite B (the dedup TAU_HIGH threshold sweep) is Phase 7.
 #
 # Usage:
 #   ./run_evals.sh research                          # baseline, all 40 examples
@@ -12,9 +12,13 @@
 #   ./run_evals.sh research --limit 5 --no-judges    # free harness smoke run
 #   ./run_evals.sh build                             # rebuild the golden dataset
 #   ./run_evals.sh check                             # is the committed dataset current?
+#   ./run_evals.sh alerts                             # dedup threshold sweep
+#   ./run_evals.sh alerts --min-precision 0.95
 #
 # An eval run is the largest quota spike in this project — the runner prints an
-# estimate and waits for confirmation before spending anything.
+# estimate and waits for confirmation before spending anything. Suite B is the
+# exception: no LLM call anywhere in it, only the local bge-small embedder, so
+# it costs nothing and needs no confirmation.
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -52,11 +56,10 @@ case "$SUITE" in
         exec .venv/bin/python -m evals.build_dataset --check
         ;;
     alerts)
-        echo "Suite B (alert fire/suppress) lands in Phase 7." >&2
-        exit 1
+        exec .venv/bin/python -m evals.run_monitor_eval "$@"
         ;;
     *)
-        echo "Usage: ./run_evals.sh {research|build|check} [options]" >&2
+        echo "Usage: ./run_evals.sh {research|build|check|alerts} [options]" >&2
         exit 1
         ;;
 esac

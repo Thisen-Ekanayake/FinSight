@@ -11,6 +11,7 @@
 #   GOLDEN_PATH, MAX_CONCURRENCY
 #   LLM_CALLS_PER_EXAMPLE, estimate_run(n) -> RunEstimate
 #   JUDGE_PROMPT_SYSTEM / _USER
+#   DEDUP_GOLDEN_PATH, SWEEP_LOW, SWEEP_HIGH, SWEEP_STEP, MIN_SUPPRESSION_PRECISION  (Suite B)
 #
 # ══ WHY AN ESTIMATOR LIVES IN CONFIG ══
 #   An eval run is the single largest quota spike in this project: 40 examples
@@ -40,6 +41,21 @@ EVAL_PROJECT: str = "finsight-eval"
 EVALS_DIR: Path = PROJECT_ROOT / "evals"
 GOLDEN_PATH: Path = EVALS_DIR / "datasets" / "research_golden.jsonl"
 RESULTS_DOC: Path = PROJECT_ROOT / "docs" / "eval_results.md"
+
+# ── Suite B: the dedup threshold sweep ──────────────────
+# Hand-authored canonical-style text, clustered by the real-world event each
+# paraphrases — NOT LLM-generated, NOT pulled from a live run (the system has
+# not yet produced enough real HIGH-severity volume to fill 60+ pairs). See
+# evals/run_monitor_eval.py for how clusters become labelled pairs.
+DEDUP_GOLDEN_PATH: Path = EVALS_DIR / "datasets" / "dedup_golden.jsonl"
+
+# The exact commitment docs/dedup_algorithm.md made: sweep TAU_HIGH across
+# this range and pick the LOWEST value clearing the precision floor — not
+# max F1, because a false suppress costs more than a false fire.
+SWEEP_LOW: float = 0.70
+SWEEP_HIGH: float = 0.99
+SWEEP_STEP: float = 0.01
+MIN_SUPPRESSION_PRECISION: float = 0.97
 
 # ── Archetypes ──────────────────────────────────────────
 # Five question shapes that fail in different ways. Splitting the score by
