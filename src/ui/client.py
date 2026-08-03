@@ -14,6 +14,7 @@
 #   get_thread(thread_id)                 GET  /research/threads/{id}
 #   list_runs(limit)                      GET  /research/runs
 #   run_cycle(warmup, tickers)            POST /monitor/cycles
+#   get_pending_alerts(cycle_id)          GET  /monitor/cycles/{id}/pending
 #   resume_cycle(cycle_id, decisions)     POST /monitor/cycles/{id}/resume
 #   list_cycles(limit, status)            GET  /monitor/cycles
 #   list_alerts(...)                      GET  /monitor/alerts
@@ -115,6 +116,12 @@ def run_cycle(*, warmup: bool = False, tickers: list[str] | None = None) -> dict
     result: dict[str, Any] = _request(
         "POST", "/monitor/cycles", json={"warmup": warmup, "tickers": tickers or []}, timeout=LONG_TIMEOUT
     )
+    return result
+
+
+def get_pending_alerts(cycle_id: str) -> list[dict[str, Any]]:
+    """The HIGH alerts one paused cycle is actually waiting on, in full."""
+    result: list[dict[str, Any]] = _request("GET", f"/monitor/cycles/{cycle_id}/pending")
     return result
 
 

@@ -577,6 +577,21 @@ class TestMonitorRoutes:
     def test_an_unknown_cycle_is_404(self, client):
         assert client.get("/monitor/cycles/nope").status_code == 404
 
+    def test_pending_alerts_for_a_paused_cycle(self, client):
+        alert = _alert(alert_id="a1", severity="HIGH")
+
+        with patch("src.monitor.graph.pending_alerts_for", return_value=[alert]):
+            body = client.get("/monitor/cycles/c-paused/pending").json()
+
+        assert len(body) == 1
+        assert body[0]["alert_id"] == "a1"
+
+    def test_pending_alerts_for_a_cycle_with_nothing_pending_is_empty(self, client):
+        with patch("src.monitor.graph.pending_alerts_for", return_value=[]):
+            body = client.get("/monitor/cycles/c-done/pending").json()
+
+        assert body == []
+
     def test_a_cycle_that_pauses_reports_pending_approval(self, client):
         """
         A HIGH alert pauses the graph before dispatcher_node runs — the

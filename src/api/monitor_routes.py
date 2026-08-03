@@ -8,6 +8,7 @@
 #   POST /monitor/cycles              run one cycle now
 #   GET  /monitor/cycles              recent cycles, optionally by status
 #   GET  /monitor/cycles/{id}         one cycle
+#   GET  /monitor/cycles/{id}/pending a paused cycle's pending alerts, in full
 #   POST /monitor/cycles/{id}/resume  decide a paused cycle's pending alerts
 #   GET  /monitor/alerts              fired alerts
 #   GET  /monitor/alerts/{id}         one alert
@@ -219,6 +220,32 @@ async def get_one_cycle(cycle_id: str) -> CycleOut:
     if row is None:
         raise HTTPException(status_code=404, detail=f"No cycle {cycle_id}")
     return CycleOut(**row)
+
+
+@router.get("/cycles/{cycle_id}/pending", response_model=list[AlertOut], summary="A paused cycle's pending alerts")
+async def get_pending_alerts(cycle_id: str, http_request: Request) -> list[AlertOut]:
+    """
+    The HIGH alerts one paused cycle is actually waiting on.
+
+    Not part of CycleOut: those alerts have not been written to AlertRecord
+    yet — that only happens once persist_cycle_node runs, which is exactly
+    what has NOT happened for a paused cycle. This reads the checkpointer
+    directly instead, the same extraction the CLI's ``--pending`` uses and
+    resume_cycle itself validates a decisions dict against.
+
+    Returns an empty list for a cycle that does not exist or is not
+    currently paused — the dashboard can't tell "wrong id" from "already
+    resolved" from this alone, which is fine: either way there is nothing
+    left to decide.
+    """
+    from src.monitor.graph import pending_alerts_for
+
+    checkpointer = getattr(http_request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        raise HTTPException(status_code=500, detail="No checkpointer configured")
+
+    pending = pending_alerts_for(cycle_id, checkpointer=checkpointer)
+    return [_alert_out(dict(alert)) for alert in pending]
 
 
 # ── Alerts ──────────────────────────────────────────────

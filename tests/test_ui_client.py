@@ -47,6 +47,13 @@ class TestSuccess:
         _, kwargs = mock_req.call_args
         assert kwargs["json"]["thread_id"] == "research:abc"
 
+    def test_get_pending_alerts_hits_the_right_path(self):
+        with patch("requests.request", return_value=fake_response(json_body=[{"alert_id": "a1"}])) as mock_req:
+            result = client.get_pending_alerts("c1")
+        args, _ = mock_req.call_args
+        assert args[1].endswith("/monitor/cycles/c1/pending")
+        assert result == [{"alert_id": "a1"}]
+
     def test_resume_cycle_posts_decisions(self):
         with patch("requests.request", return_value=fake_response(json_body={"status": "COMPLETE"})) as mock_req:
             client.resume_cycle("c1", {"a1": "approve"})
