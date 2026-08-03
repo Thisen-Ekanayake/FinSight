@@ -5,12 +5,13 @@
 # Purpose : HTTP surface for Subsystem 2.
 #
 # Routes:
-#   POST /monitor/cycles            run one cycle now
-#   GET  /monitor/cycles            recent cycles
-#   GET  /monitor/cycles/{id}       one cycle
-#   GET  /monitor/alerts            fired alerts
-#   GET  /monitor/alerts/{id}       one alert
-#   GET  /monitor/decisions         every dedup decision, with its score
+#   POST /monitor/cycles              run one cycle now
+#   GET  /monitor/cycles              recent cycles, optionally by status
+#   GET  /monitor/cycles/{id}         one cycle
+#   POST /monitor/cycles/{id}/resume  decide a paused cycle's pending alerts
+#   GET  /monitor/alerts              fired alerts
+#   GET  /monitor/alerts/{id}         one alert
+#   GET  /monitor/decisions           every dedup decision, with its score
 #
 # ══ /decisions EXISTS ON PURPOSE ══
 #   Most projects hide their cleverest logic behind a number. A dedup engine
@@ -23,6 +24,13 @@
 #   The graph is synchronous: it embeds, calls Qdrant, and hits four data
 #   providers, all blocking. Awaiting it directly on the event loop would
 #   stall every other request for the length of a cycle.
+#
+# ══ POST /resume EXISTS BECAUSE A HIGH ALERT PAUSES THE GRAPH ══
+#   POST /cycles can now return with status="PENDING_APPROVAL" — the graph
+#   interrupted before dispatcher_node ran. Nothing further happens to that
+#   cycle until this endpoint supplies a decision for every alert it is
+#   waiting on. See src/monitor/graph.py resume_cycle for why the decisions
+#   dict must match the pending set exactly.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ from src.api.schemas import (
     CycleRunRequest,
     CycleRunResponse,
     DedupDecisionOut,
+    ResumeCycleRequest,
     SuppressionOut,
 )
 from src.persistence.repository import AlertRow, get_alert, get_cycle, list_alerts, list_cycles, list_dedup_decisions
@@ -84,6 +93,39 @@ def _row_out(row: AlertRow) -> AlertOut:
     return _alert_out(dict(row))
 
 
+def _cycle_run_response(state: dict[str, Any], *, elapsed_ms: int) -> CycleRunResponse:
+    """
+    Shape a (possibly paused) MonitorState for the wire.
+
+    Shared between run_monitor_cycle and resume_monitor_cycle: a resumed
+    cycle's final state has exactly the same shape as a completed one, and
+    duplicating this would be the two response bodies quietly drifting apart.
+    """
+    return CycleRunResponse(
+        cycle_id=state.get("cycle_id", ""),
+        status="PENDING_APPROVAL" if "__interrupt__" in state else "COMPLETE",
+        warmup=bool(state.get("warmup")),
+        candidate_count=len(state.get("candidates") or []),
+        fired=[_alert_out(dict(a)) for a in state.get("fired") or []],
+        merged=[_alert_out(dict(a)) for a in state.get("merged") or []],
+        suppressed=[
+            SuppressionOut(
+                ticker=record["ticker"],
+                alert_type=record["alert_type"],
+                headline=record["headline"],
+                parent_alert_id=record["parent_alert_id"],
+                parent_headline=record["parent_headline"],
+                score=record["score"],
+                reason=record["reason"],
+            )
+            for record in state.get("suppressed") or []
+        ],
+        pending_approval=[_alert_out(dict(a)) for a in state.get("pending_approval") or []],
+        errors=list(state.get("monitor_errors") or []),
+        duration_ms=elapsed_ms,
+    )
+
+
 # ── Cycles ──────────────────────────────────────────────
 @router.post("/cycles", response_model=CycleRunResponse, summary="Run one monitoring cycle")
 async def run_monitor_cycle(request: CycleRunRequest, http_request: Request) -> CycleRunResponse:
@@ -93,6 +135,10 @@ async def run_monitor_cycle(request: CycleRunRequest, http_request: Request) -> 
     Run once with ``warmup: true`` before the first real cycle. A cold dedup
     index has nothing to match against, so cycle 1 would otherwise report every
     open filing, every recent article, and every price move in one burst.
+
+    A HIGH alert pauses the graph: the response comes back with
+    ``status: "PENDING_APPROVAL"`` and a populated ``pending_approval`` rather
+    than waiting for a human — see ``POST /monitor/cycles/{cycle_id}/resume``.
     """
     from src.monitor.graph import run_cycle
 
@@ -113,34 +159,51 @@ async def run_monitor_cycle(request: CycleRunRequest, http_request: Request) -> 
         raise HTTPException(status_code=500, detail=f"Cycle failed: {type(exc).__name__}: {exc}") from exc
 
     elapsed = int((time.monotonic() - started) * 1000)
+    return _cycle_run_response(dict(state), elapsed_ms=elapsed)
 
-    return CycleRunResponse(
-        cycle_id=state.get("cycle_id", ""),
-        warmup=bool(state.get("warmup")),
-        candidate_count=len(state.get("candidates") or []),
-        fired=[_alert_out(dict(a)) for a in state.get("fired") or []],
-        merged=[_alert_out(dict(a)) for a in state.get("merged") or []],
-        suppressed=[
-            SuppressionOut(
-                ticker=record["ticker"],
-                alert_type=record["alert_type"],
-                headline=record["headline"],
-                parent_alert_id=record["parent_alert_id"],
-                parent_headline=record["parent_headline"],
-                score=record["score"],
-                reason=record["reason"],
-            )
-            for record in state.get("suppressed") or []
-        ],
-        errors=list(state.get("monitor_errors") or []),
-        duration_ms=elapsed,
-    )
+
+@router.post("/cycles/{cycle_id}/resume", response_model=CycleRunResponse, summary="Decide a paused cycle")
+async def resume_monitor_cycle(cycle_id: str, request: ResumeCycleRequest, http_request: Request) -> CycleRunResponse:
+    """
+    Continue a cycle paused at ``PENDING_APPROVAL`` with a human's decisions.
+
+    ``decisions`` must name exactly the alert ids the cycle is waiting on —
+    a subset leaves some alerts undecided rather than partially resolving
+    them, and an id that does not belong to this cycle is very likely a
+    copy-paste mistake from another one. Both are rejected as 400s rather
+    than silently accepted.
+    """
+    from src.monitor.graph import resume_cycle
+
+    checkpointer = getattr(http_request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        raise HTTPException(status_code=500, detail="No checkpointer configured — cannot resume a paused cycle")
+
+    started = time.monotonic()
+    try:
+        state = await asyncio.to_thread(
+            resume_cycle,
+            cycle_id,
+            request.decisions,
+            checkpointer=checkpointer,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Resuming cycle %s failed", cycle_id)
+        raise HTTPException(status_code=500, detail=f"Resume failed: {type(exc).__name__}: {exc}") from exc
+
+    elapsed = int((time.monotonic() - started) * 1000)
+    return _cycle_run_response(dict(state), elapsed_ms=elapsed)
 
 
 @router.get("/cycles", response_model=list[CycleOut], summary="Recent cycles")
-async def get_cycles(limit: int = Query(default=25, ge=1, le=200)) -> list[CycleOut]:
-    """List recent cycles, newest first."""
-    return [CycleOut(**row) for row in list_cycles(limit=limit)]
+async def get_cycles(
+    limit: int = Query(default=25, ge=1, le=200),
+    status: str | None = Query(default=None, description="COMPLETE or PENDING_APPROVAL"),
+) -> list[CycleOut]:
+    """List recent cycles, newest first, optionally filtered by status."""
+    return [CycleOut(**row) for row in list_cycles(limit=limit, status=status)]
 
 
 @router.get("/cycles/{cycle_id}", response_model=CycleOut, summary="One cycle")

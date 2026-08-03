@@ -299,6 +299,7 @@ class CycleOut(BaseModel):
     """One monitoring cycle, summarised."""
 
     cycle_id: str
+    status: str
     warmup: bool
     tickers: list[str]
     candidate_count: int
@@ -319,13 +320,36 @@ class CycleRunRequest(BaseModel):
 
 
 class CycleRunResponse(BaseModel):
-    """The outcome of one cycle, including what it chose not to tell you."""
+    """
+    The outcome of one cycle, including what it chose not to tell you.
+
+    ``status`` is "COMPLETE" for an ordinary cycle. "PENDING_APPROVAL" means
+    the graph paused before dispatcher_node ran — ``fired``/``merged`` here
+    are the PRE-decision state (a HIGH alert still carries status
+    PENDING_APPROVAL) and ``pending_approval`` is what a human has to resolve
+    via ``POST /monitor/cycles/{cycle_id}/resume`` before anything is
+    actually delivered.
+    """
 
     cycle_id: str
+    status: str
     warmup: bool
     candidate_count: int
     fired: list[AlertOut]
     merged: list[AlertOut]
     suppressed: list[SuppressionOut]
+    pending_approval: list[AlertOut] = Field(default_factory=list)
     errors: list[str]
     duration_ms: int
+
+
+class ResumeCycleRequest(BaseModel):
+    """
+    Decide every pending alert on a paused cycle.
+
+    ``decisions`` must cover EXACTLY the alert ids the cycle is waiting on —
+    see resume_cycle's docstring in src/monitor/graph.py for why a partial or
+    mismatched dict is rejected rather than partially applied.
+    """
+
+    decisions: dict[str, str] = Field(description='{alert_id: "approve" | "reject"}, one entry per pending alert')

@@ -559,5 +559,88 @@ class TestMonitorRoutes:
 
         assert [row["cycle_id"] for row in client.get("/monitor/cycles").json()] == ["c2", "c1"]
 
+    def test_cycles_are_filterable_by_status(self, client):
+        from src.persistence.repository import record_cycle
+
+        record_cycle({"cycle_id": "c1", "watchlist": []}, duration_ms=1, status="PENDING_APPROVAL")
+        record_cycle({"cycle_id": "c2", "watchlist": []}, duration_ms=1, status="COMPLETE")
+
+        body = client.get("/monitor/cycles", params={"status": "PENDING_APPROVAL"}).json()
+        assert [row["cycle_id"] for row in body] == ["c1"]
+
     def test_an_unknown_cycle_is_404(self, client):
         assert client.get("/monitor/cycles/nope").status_code == 404
+
+    def test_a_cycle_that_pauses_reports_pending_approval(self, client):
+        """
+        A HIGH alert pauses the graph before dispatcher_node runs — the
+        response must say so rather than looking like an ordinary completion
+        with an empty fired list.
+        """
+        alert = _alert(alert_id="a1", severity="HIGH", status="PENDING_APPROVAL")
+        state = {
+            "cycle_id": "c-paused",
+            "warmup": False,
+            "candidates": [{}],
+            "fired": [alert],
+            "merged": [],
+            "suppressed": [],
+            "pending_approval": [alert],
+            "monitor_errors": [],
+            "watchlist": [],
+            "__interrupt__": ["anything — only membership is checked"],
+        }
+
+        with patch("src.monitor.graph.run_cycle", return_value=state):
+            body = client.post("/monitor/cycles", json={"warmup": False}).json()
+
+        assert body["status"] == "PENDING_APPROVAL"
+        assert len(body["pending_approval"]) == 1
+        assert body["pending_approval"][0]["alert_id"] == "a1"
+
+    def test_an_ordinary_cycle_reports_complete(self, client):
+        state = {"cycle_id": "c1", "warmup": False, "candidates": [], "fired": [], "merged": [], "suppressed": []}
+
+        with patch("src.monitor.graph.run_cycle", return_value=state):
+            body = client.post("/monitor/cycles", json={"warmup": False}).json()
+
+        assert body["status"] == "COMPLETE"
+        assert body["pending_approval"] == []
+
+    def test_resuming_a_paused_cycle_dispatches_the_approved_alert(self, client):
+        alert = _alert(alert_id="a1", severity="HIGH", status="FIRED")
+        state = {
+            "cycle_id": "c-paused",
+            "warmup": False,
+            "candidates": [{}],
+            "fired": [alert],
+            "merged": [],
+            "suppressed": [],
+            "monitor_errors": [],
+            "watchlist": [],
+        }
+
+        with patch("src.monitor.graph.resume_cycle", return_value=state) as mock_resume:
+            response = client.post("/monitor/cycles/c-paused/resume", json={"decisions": {"a1": "approve"}})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "COMPLETE"
+        assert body["fired"][0]["status"] == "FIRED"
+        args, kwargs = mock_resume.call_args
+        assert args == ("c-paused", {"a1": "approve"})
+        assert kwargs["checkpointer"] is not None
+
+    def test_resuming_with_a_decisions_mismatch_is_a_400_not_a_500(self, client):
+        with patch("src.monitor.graph.resume_cycle", side_effect=ValueError("decisions must cover exactly...")):
+            response = client.post("/monitor/cycles/c1/resume", json={"decisions": {"wrong-id": "approve"}})
+
+        assert response.status_code == 400
+        assert "decisions must cover" in response.json()["detail"]
+
+    def test_resuming_a_cycle_that_errors_is_a_500(self, client):
+        with patch("src.monitor.graph.resume_cycle", side_effect=RuntimeError("checkpoint db locked")):
+            response = client.post("/monitor/cycles/c1/resume", json={"decisions": {}})
+
+        assert response.status_code == 500
+        assert "checkpoint db locked" in response.json()["detail"]
