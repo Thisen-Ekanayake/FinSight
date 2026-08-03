@@ -8,6 +8,7 @@
 #
 # Public API:
 #   resolve_cik(ticker)                     ticker -> zero-padded CIK
+#   resolve_company_name(ticker)            ticker -> registrant name
 #   get_filing_index(ticker, ...)           recent filings, filterable
 #   get_company_facts(cik, ...)             XBRL facts by concept
 #   get_latest_fact(cik, concept)           most recent value for one concept
@@ -67,24 +68,53 @@ COMMON_CONCEPTS: dict[str, str] = {
 }
 
 _TICKER_MAP_CACHE: dict[str, str] = {}
+_TITLE_MAP_CACHE: dict[str, str] = {}
 
 
 # ── CIK resolution ──────────────────────────────────────
 def _load_ticker_map() -> dict[str, str]:
-    """Fetch and memoise the SEC's ticker -> CIK mapping."""
-    global _TICKER_MAP_CACHE
+    """Fetch and memoise the SEC's ticker -> CIK mapping, and its titles."""
+    global _TICKER_MAP_CACHE, _TITLE_MAP_CACHE
     if _TICKER_MAP_CACHE:
         return _TICKER_MAP_CACHE
 
     payload = fetch_json(PROVIDER, SEC_COMPANY_TICKERS_URL, ttl_key="edgar_tickers")
     # Shape is {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
-    _TICKER_MAP_CACHE = {
-        entry["ticker"].upper(): str(entry["cik_str"]).zfill(10)
-        for entry in payload.values()
-        if isinstance(entry, dict) and entry.get("ticker")
-    }
+    entries = [entry for entry in payload.values() if isinstance(entry, dict) and entry.get("ticker")]
+
+    _TICKER_MAP_CACHE = {entry["ticker"].upper(): str(entry["cik_str"]).zfill(10) for entry in entries}
+    _TITLE_MAP_CACHE = {entry["ticker"].upper(): str(entry.get("title") or "") for entry in entries}
+
     logger.info("Loaded SEC ticker map (%d symbols)", len(_TICKER_MAP_CACHE))
     return _TICKER_MAP_CACHE
+
+
+def resolve_company_name(ticker: str) -> str:
+    """
+    Resolve a ticker to its registered company name.
+
+    Comes from the same cached ``company_tickers.json`` as the CIK map, so it
+    costs no extra request. Used by the monitoring subsystem, where the company
+    name is part of the canonical alert text.
+
+    Parameters
+    ----------
+    ticker : str
+        US-listed symbol.
+
+    Returns
+    -------
+    str
+        The registrant's name, or ``""`` if the ticker is unknown. Deliberately
+        does NOT raise: a missing display name must not stop a cycle, and every
+        caller has the ticker to fall back on.
+    """
+    try:
+        _load_ticker_map()
+    except Exception as exc:  # noqa: BLE001 - a cosmetic lookup must not be fatal
+        logger.warning("Company-name lookup unavailable: %s", exc)
+        return ""
+    return _TITLE_MAP_CACHE.get(ticker.upper(), "")
 
 
 def resolve_cik(ticker: str) -> str:
@@ -112,8 +142,7 @@ def resolve_cik(ticker: str) -> str:
     if cik is None:
         raise DataSourceError(
             PROVIDER,
-            f"ticker {ticker!r} not found in SEC company_tickers.json — "
-            f"EDGAR only covers US-listed registrants.",
+            f"ticker {ticker!r} not found in SEC company_tickers.json — " f"EDGAR only covers US-listed registrants.",
         )
     return cik
 
