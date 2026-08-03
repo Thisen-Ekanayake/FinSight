@@ -15,6 +15,11 @@
 #   ~90% of duplicate news alerts that come from the same story being re-fetched
 #   across cycles — at zero embedding or LLM cost.
 #
+#   ``sentiment`` is scored LOCALLY (src/data/sentiment.py), not by the
+#   provider. Finnhub's per-article sentiment is behind their paid tier and the
+#   RSS fallback never had one, so both were returning None for every article —
+#   which left the Phase 6 news monitor unable to emit a candidate at all.
+#
 # Usage:
 #   python -m src.data.news --ticker AAPL --days 3
 # ═══════════════════════════════════════════════════════
@@ -31,6 +36,7 @@ from src.data.cache import fetch_json, fetch_text
 from src.data.config import FINNHUB_API_KEY, FINNHUB_BASE
 from src.data.rate_limit import guard
 from src.data.schemas import NewsItem
+from src.data.sentiment import score_sentiment
 
 logger = logging.getLogger(__name__)
 
@@ -108,16 +114,17 @@ def get_news_finnhub(ticker: str, *, since: datetime, until: datetime | None = N
         if not headline:
             continue
 
+        summary = row.get("summary", "")
         items.append(
             NewsItem(
                 ticker=ticker.upper(),
                 headline=headline,
-                summary=row.get("summary", ""),
+                summary=summary,
                 source=row.get("source", "finnhub"),
                 url=url,
                 published_at=datetime.fromtimestamp(published, tz=timezone.utc).isoformat(),
                 article_id=_article_id(url, headline),
-                sentiment=None,
+                sentiment=score_sentiment(headline, summary),
             )
         )
 
@@ -158,16 +165,17 @@ def get_news_rss(ticker: str, *, since: datetime) -> list[NewsItem]:
         if not headline:
             continue
 
+        summary = entry.get("summary", "")
         items.append(
             NewsItem(
                 ticker=ticker.upper(),
                 headline=headline,
-                summary=entry.get("summary", ""),
+                summary=summary,
                 source=entry.get("source", {}).get("title", "Yahoo Finance"),
                 url=url,
                 published_at=published.isoformat(),
                 article_id=_article_id(url, headline),
-                sentiment=None,
+                sentiment=score_sentiment(headline, summary),
             )
         )
 
