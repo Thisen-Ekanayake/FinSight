@@ -12,6 +12,13 @@
 #   record_api_call(provider, count)        -> int
 #   get_budget_status()                     -> list[BudgetStatus]
 #
+#   ── monitoring (Phase 6) ──
+#   list_watchlist / add_watch_item / remove_watch_item / mark_warmed_up
+#   get_checkpoints / set_checkpoint
+#   record_alert / bump_alert_occurrence / list_alerts / get_alert
+#   record_dedup_decisions / list_dedup_decisions
+#   record_cycle / list_cycles / get_cycle
+#
 # ══ WHY DETACHED DICTS, NOT ORM OBJECTS ══
 #   A session_scope() commits and closes when it exits. Handing an ORM object
 #   back across that boundary gives the caller something whose unloaded
@@ -22,15 +29,25 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, TypedDict
+from typing import Any, Iterable, TypedDict
 
 from sqlalchemy import select
 
 from src.data.config import BUDGET_SOFT_LIMIT, DAILY_BUDGETS
 from src.persistence.db import session_scope
-from src.persistence.models import ApiBudget, ResearchRun, utcnow
+from src.persistence.models import (
+    AlertRecord,
+    ApiBudget,
+    DedupDecision,
+    MonitorCheckpoint,
+    MonitorCycle,
+    ResearchRun,
+    WatchItem,
+    utcnow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +88,25 @@ def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _iso_utc(value: datetime) -> str:
+    """
+    Serialise a stored timestamp as an explicitly UTC ISO string.
+
+    ══ SQLITE HAS NO TIMESTAMP TYPE ══
+    ``DateTime(timezone=True)`` round-trips to a NAIVE datetime on SQLite
+    however it went in — the offset is simply not stored. Handing that
+    straight back out is fine for display, but the monitor checkpoints are
+    read, parsed, and compared against ``datetime.now(timezone.utc)``, and
+    comparing naive to aware raises TypeError.
+
+    Worse, it would raise inside a Send() branch, where the specialist wrapper
+    turns it into one monitor quietly contributing nothing — a silent gap in
+    coverage rather than a crash. So the offset is reattached on the way out,
+    once, here.
+    """
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+
+
 def _to_summary(run: ResearchRun) -> ResearchRunSummary:
     """Flatten an ORM row into a detached dict, inside the session."""
     return ResearchRunSummary(
@@ -87,7 +123,7 @@ def _to_summary(run: ResearchRun) -> ResearchRunSummary:
         tool_call_count=run.tool_call_count,
         error_count=run.error_count,
         latency_ms=run.latency_ms,
-        created_at=run.created_at.isoformat(),
+        created_at=_iso_utc(run.created_at),
     )
 
 
@@ -227,3 +263,481 @@ def get_budget_status() -> list[BudgetStatus]:
         )
 
     return statuses
+
+
+# ═══════════════════════════════════════════════════════
+# Monitoring subsystem (Phase 6)
+# ═══════════════════════════════════════════════════════
+
+
+class WatchItemRow(TypedDict):
+    """One watched ticker."""
+
+    ticker: str
+    company_name: str
+    active: bool
+    warmed_up: bool
+    added_at: str
+
+
+class AlertRow(TypedDict):
+    """One fired alert, flattened out of the session."""
+
+    alert_id: str
+    cycle_id: str
+    ticker: str
+    alert_type: str
+    severity: str
+    status: str
+    headline: str
+    detail: str
+    canonical_text: str
+    dedup_key: str
+    evidence: list[dict[str, Any]]
+    metrics: dict[str, Any]
+    occurrence_count: int
+    first_seen_at: str
+    last_seen_at: str
+    fired_at: str
+    parent_alert_id: str | None
+
+
+class DedupDecisionRow(TypedDict):
+    """One recorded dedup decision, with the score behind it."""
+
+    cycle_id: str
+    ticker: str
+    alert_type: str
+    severity: str
+    decision: str
+    reason: str
+    dedup_key: str
+    candidate_text: str
+    parent_alert_id: str | None
+    parent_text: str
+    score: float
+    decided_at: str
+
+
+class CycleRow(TypedDict):
+    """One monitoring cycle, summarised."""
+
+    cycle_id: str
+    warmup: bool
+    tickers: list[str]
+    candidate_count: int
+    fired_count: int
+    suppressed_count: int
+    merged_count: int
+    error_count: int
+    api_call_count: int
+    started_at: str
+    duration_ms: int
+
+
+# ── Watchlist ───────────────────────────────────────────
+def _to_watch_row(item: WatchItem) -> WatchItemRow:
+    return WatchItemRow(
+        ticker=item.ticker,
+        company_name=item.company_name,
+        active=item.active,
+        warmed_up=item.warmed_up,
+        added_at=_iso_utc(item.added_at),
+    )
+
+
+def list_watchlist(*, active_only: bool = True) -> list[WatchItemRow]:
+    """
+    Return the watched tickers, alphabetically.
+
+    Parameters
+    ----------
+    active_only : bool, default True
+        Exclude soft-deleted entries.
+
+    Returns
+    -------
+    list of WatchItemRow
+    """
+    with session_scope() as session:
+        statement = select(WatchItem).order_by(WatchItem.ticker)
+        if active_only:
+            statement = statement.where(WatchItem.active.is_(True))
+        return [_to_watch_row(row) for row in session.scalars(statement).all()]
+
+
+def add_watch_item(ticker: str, *, company_name: str = "") -> WatchItemRow:
+    """
+    Add a ticker to the watchlist, or reactivate one that was removed.
+
+    Reactivation deliberately does NOT reset ``warmed_up``. A ticker that has
+    already been through a warmup cycle has its events in the dedup index; re-
+    warming it would re-upsert the same points and delay real alerts for
+    nothing.
+
+    Parameters
+    ----------
+    ticker : str
+        US-listed symbol. Upper-cased.
+    company_name : str, optional
+        Display name, used in the canonical alert text.
+
+    Returns
+    -------
+    WatchItemRow
+    """
+    symbol = ticker.strip().upper()
+
+    with session_scope() as session:
+        item = session.scalar(select(WatchItem).where(WatchItem.ticker == symbol))
+        if item is None:
+            item = WatchItem(ticker=symbol, company_name=company_name)
+            session.add(item)
+        else:
+            item.active = True
+            if company_name:
+                item.company_name = company_name
+        session.flush()
+        row = _to_watch_row(item)
+
+    logger.info("Watchlist: %s active (warmed_up=%s)", symbol, row["warmed_up"])
+    return row
+
+
+def remove_watch_item(ticker: str) -> bool:
+    """
+    Soft-delete a ticker. Returns True if it was present and active.
+
+    Soft rather than hard so the MonitorCheckpoint rows survive — see the
+    WatchItem docstring for why re-adding with a wiped checkpoint is a
+    problem.
+    """
+    symbol = ticker.strip().upper()
+
+    with session_scope() as session:
+        item = session.scalar(select(WatchItem).where(WatchItem.ticker == symbol))
+        if item is None or not item.active:
+            return False
+        item.active = False
+
+    logger.info("Watchlist: %s deactivated", symbol)
+    return True
+
+
+def mark_warmed_up(tickers: Iterable[str]) -> int:
+    """Flag tickers as having completed a warmup cycle. Returns rows touched."""
+    symbols = [t.strip().upper() for t in tickers if t.strip()]
+    if not symbols:
+        return 0
+
+    with session_scope() as session:
+        rows = session.scalars(select(WatchItem).where(WatchItem.ticker.in_(symbols))).all()
+        for row in rows:
+            row.warmed_up = True
+        return len(rows)
+
+
+# ── Monitor checkpoints ─────────────────────────────────
+def get_checkpoints(tickers: Iterable[str] | None = None) -> dict[str, str]:
+    """
+    Return ``{"TICKER:monitor": iso_timestamp}`` for the last successful check.
+
+    A flat string key rather than nested dicts because this travels through
+    graph state, and LangGraph state is serialised to the checkpointer —
+    tuple keys would not survive the round trip.
+
+    Parameters
+    ----------
+    tickers : iterable of str, optional
+        Restrict to these symbols. All if None.
+
+    Returns
+    -------
+    dict
+        Empty for a ticker/monitor pair that has never run, which the monitors
+        read as "fall back to the default lookback".
+    """
+    with session_scope() as session:
+        statement = select(MonitorCheckpoint)
+        if tickers is not None:
+            symbols = [t.strip().upper() for t in tickers if t.strip()]
+            if not symbols:
+                return {}
+            statement = statement.where(MonitorCheckpoint.ticker.in_(symbols))
+        rows = session.scalars(statement).all()
+        return {f"{row.ticker}:{row.monitor}": _iso_utc(row.last_checked_at) for row in rows}
+
+
+def set_checkpoint(ticker: str, monitor: str, *, when: datetime | None = None) -> None:
+    """
+    Advance one monitor's watermark for one ticker.
+
+    Call this ONLY after a successful fetch. Advancing it on failure would skip
+    whatever was published during the outage, silently and permanently.
+    """
+    symbol = ticker.strip().upper()
+    stamp = when or utcnow()
+
+    with session_scope() as session:
+        row = session.scalar(
+            select(MonitorCheckpoint).where(
+                MonitorCheckpoint.ticker == symbol,
+                MonitorCheckpoint.monitor == monitor,
+            )
+        )
+        if row is None:
+            row = MonitorCheckpoint(ticker=symbol, monitor=monitor)
+            session.add(row)
+        row.last_checked_at = stamp
+
+
+# ── Alerts ──────────────────────────────────────────────
+def _to_alert_row(record: AlertRecord) -> AlertRow:
+    return AlertRow(
+        alert_id=record.alert_id,
+        cycle_id=record.cycle_id,
+        ticker=record.ticker,
+        alert_type=record.alert_type,
+        severity=record.severity,
+        status=record.status,
+        headline=record.headline,
+        detail=record.detail,
+        canonical_text=record.canonical_text,
+        dedup_key=record.dedup_key,
+        evidence=json.loads(record.evidence_json or "[]"),
+        metrics=json.loads(record.metrics_json or "{}"),
+        occurrence_count=record.occurrence_count,
+        first_seen_at=_iso_utc(record.first_seen_at),
+        last_seen_at=_iso_utc(record.last_seen_at),
+        fired_at=_iso_utc(record.fired_at),
+        parent_alert_id=record.parent_alert_id,
+    )
+
+
+def record_alert(alert: dict[str, Any], *, cycle_id: str) -> str:
+    """
+    Persist one fired alert, upserting on ``alert_id``.
+
+    Parameters
+    ----------
+    alert : dict
+        An ``Alert`` as defined in src/monitor/state.py. Passed as a plain dict
+        so persistence stays below monitor in the import order — the same
+        arrangement record_research_run has with ResearchState.
+    cycle_id : str
+        The cycle that produced it.
+
+    Returns
+    -------
+    str
+        The alert id.
+    """
+    with session_scope() as session:
+        record = session.scalar(select(AlertRecord).where(AlertRecord.alert_id == alert["alert_id"]))
+        if record is None:
+            record = AlertRecord(alert_id=alert["alert_id"])
+            session.add(record)
+
+        record.cycle_id = cycle_id
+        record.ticker = alert.get("ticker", "")
+        record.alert_type = alert.get("alert_type", "")
+        record.severity = alert.get("severity", "LOW")
+        record.status = alert.get("status", "FIRED")
+        record.headline = alert.get("headline", "")
+        record.detail = alert.get("detail", "")
+        record.canonical_text = alert.get("canonical_text", "")
+        record.dedup_key = alert.get("dedup_key", "")
+        record.evidence_json = json.dumps(alert.get("evidence", []))
+        record.metrics_json = json.dumps(alert.get("metrics", {}))
+        record.occurrence_count = int(alert.get("occurrence_count", 1))
+        record.parent_alert_id = alert.get("parent_alert_id")
+
+        for field in ("first_seen_at", "last_seen_at", "fired_at"):
+            raw = alert.get(field)
+            if raw:
+                setattr(record, field, datetime.fromisoformat(raw))
+
+    return str(alert["alert_id"])
+
+
+def bump_alert_occurrence(alert_id: str, *, last_seen_at: str | None = None) -> int:
+    """
+    Increment a parent alert's occurrence count after a suppression.
+
+    Returns
+    -------
+    int
+        The new count, or 0 if the alert is not in SQLite — which happens
+        legitimately when the Qdrant point outlives its row (a restored
+        database, a manually seeded index), and must not raise mid-cycle.
+    """
+    with session_scope() as session:
+        record = session.scalar(select(AlertRecord).where(AlertRecord.alert_id == alert_id))
+        if record is None:
+            logger.warning("Suppression matched %s, which has no SQLite row", alert_id)
+            return 0
+        record.occurrence_count += 1
+        record.last_seen_at = datetime.fromisoformat(last_seen_at) if last_seen_at else utcnow()
+        return record.occurrence_count
+
+
+def list_alerts(
+    *,
+    limit: int = 50,
+    ticker: str | None = None,
+    severity: str | None = None,
+    status: str | None = None,
+) -> list[AlertRow]:
+    """Return recent alerts, newest first, optionally filtered."""
+    with session_scope() as session:
+        statement = select(AlertRecord).order_by(AlertRecord.fired_at.desc()).limit(limit)
+        if ticker:
+            statement = statement.where(AlertRecord.ticker == ticker.strip().upper())
+        if severity:
+            statement = statement.where(AlertRecord.severity == severity.upper())
+        if status:
+            statement = statement.where(AlertRecord.status == status.upper())
+        return [_to_alert_row(row) for row in session.scalars(statement).all()]
+
+
+def get_alert(alert_id: str) -> AlertRow | None:
+    """Return one alert by id, or None."""
+    with session_scope() as session:
+        record = session.scalar(select(AlertRecord).where(AlertRecord.alert_id == alert_id))
+        return _to_alert_row(record) if record else None
+
+
+# ── Dedup decisions ─────────────────────────────────────
+def record_dedup_decisions(decisions: Iterable[dict[str, Any]], *, cycle_id: str) -> int:
+    """
+    Append every dedup decision from a cycle, including the FIREs.
+
+    Recording only suppressions would leave Phase 7's threshold sweep with a
+    sample containing no negatives — a dataset that can only ever justify the
+    threshold that produced it.
+
+    Returns
+    -------
+    int
+        Rows written.
+    """
+    rows = list(decisions)
+    if not rows:
+        return 0
+
+    with session_scope() as session:
+        for decision in rows:
+            session.add(
+                DedupDecision(
+                    cycle_id=cycle_id,
+                    ticker=decision.get("ticker", ""),
+                    alert_type=decision.get("alert_type", ""),
+                    severity=decision.get("severity", "LOW"),
+                    decision=decision.get("decision", ""),
+                    reason=decision.get("reason", ""),
+                    dedup_key=decision.get("dedup_key", ""),
+                    candidate_text=decision.get("candidate_text", ""),
+                    parent_alert_id=decision.get("parent_alert_id"),
+                    parent_text=decision.get("parent_text", ""),
+                    score=float(decision.get("score", 0.0)),
+                )
+            )
+    return len(rows)
+
+
+def list_dedup_decisions(*, limit: int = 200, decision: str | None = None) -> list[DedupDecisionRow]:
+    """Return recent dedup decisions, newest first — the Phase 7 sweep's input."""
+    with session_scope() as session:
+        statement = select(DedupDecision).order_by(DedupDecision.decided_at.desc()).limit(limit)
+        if decision:
+            statement = statement.where(DedupDecision.decision == decision.upper())
+        return [
+            DedupDecisionRow(
+                cycle_id=row.cycle_id,
+                ticker=row.ticker,
+                alert_type=row.alert_type,
+                severity=row.severity,
+                decision=row.decision,
+                reason=row.reason,
+                dedup_key=row.dedup_key,
+                candidate_text=row.candidate_text,
+                parent_alert_id=row.parent_alert_id,
+                parent_text=row.parent_text,
+                score=row.score,
+                decided_at=_iso_utc(row.decided_at),
+            )
+            for row in session.scalars(statement).all()
+        ]
+
+
+# ── Cycles ──────────────────────────────────────────────
+def _to_cycle_row(cycle: MonitorCycle) -> CycleRow:
+    return CycleRow(
+        cycle_id=cycle.cycle_id,
+        warmup=cycle.warmup,
+        tickers=[t for t in cycle.tickers.split(",") if t],
+        candidate_count=cycle.candidate_count,
+        fired_count=cycle.fired_count,
+        suppressed_count=cycle.suppressed_count,
+        merged_count=cycle.merged_count,
+        error_count=cycle.error_count,
+        api_call_count=cycle.api_call_count,
+        started_at=_iso_utc(cycle.started_at),
+        duration_ms=cycle.duration_ms,
+    )
+
+
+def record_cycle(state: dict[str, Any], *, duration_ms: int) -> str:
+    """
+    Summarise one finished monitoring cycle.
+
+    Parameters
+    ----------
+    state : dict
+        The final MonitorState.
+    duration_ms : int
+        Wall-clock duration.
+
+    Returns
+    -------
+    str
+        The cycle id.
+    """
+    cycle_id = str(state.get("cycle_id", ""))
+
+    with session_scope() as session:
+        cycle = session.scalar(select(MonitorCycle).where(MonitorCycle.cycle_id == cycle_id))
+        if cycle is None:
+            cycle = MonitorCycle(cycle_id=cycle_id)
+            session.add(cycle)
+
+        cycle.warmup = bool(state.get("warmup", False))
+        cycle.tickers = ",".join(item["ticker"] for item in state.get("watchlist", []))
+        cycle.candidate_count = len(state.get("candidates", []))
+        cycle.fired_count = len(state.get("fired", []))
+        cycle.suppressed_count = len(state.get("suppressed", []))
+        cycle.merged_count = len(state.get("merged", []))
+        cycle.error_count = len(state.get("monitor_errors", []))
+        cycle.api_call_count = len(state.get("api_calls", []))
+        cycle.duration_ms = duration_ms
+
+        started = state.get("started_at")
+        if started:
+            cycle.started_at = datetime.fromisoformat(started)
+
+    logger.info("Recorded cycle %s (%d fired)", cycle_id, len(state.get("fired", [])))
+    return cycle_id
+
+
+def list_cycles(*, limit: int = 50) -> list[CycleRow]:
+    """Return recent cycles, newest first."""
+    with session_scope() as session:
+        rows = session.scalars(select(MonitorCycle).order_by(MonitorCycle.started_at.desc()).limit(limit)).all()
+        return [_to_cycle_row(row) for row in rows]
+
+
+def get_cycle(cycle_id: str) -> CycleRow | None:
+    """Return one cycle by id, or None."""
+    with session_scope() as session:
+        cycle = session.scalar(select(MonitorCycle).where(MonitorCycle.cycle_id == cycle_id))
+        return _to_cycle_row(cycle) if cycle else None

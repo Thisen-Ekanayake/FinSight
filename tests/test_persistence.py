@@ -219,3 +219,244 @@ class TestBudgets:
             rows = session.query(ApiBudget).all()
             assert len(rows) == 1
             assert len(rows[0].day) == 10  # ISO date
+
+
+# ═══════════════════════════════════════════════════════
+# Monitoring subsystem (Phase 6)
+# ═══════════════════════════════════════════════════════
+
+
+def _alert(**overrides):
+    alert = {
+        "alert_id": "a1",
+        "ticker": "AAPL",
+        "alert_type": "PRICE_MOVE",
+        "severity": "MED",
+        "status": "FIRED",
+        "headline": "AAPL fell 5.2%",
+        "detail": "Closed at 210.11, down 5.2% on 2.1x average volume.",
+        "canonical_text": "AAPL Apple Inc. | PRICE_MOVE | sharp single-day decline on elevated volume",
+        "dedup_key": "abc123",
+        "evidence": [{"source_type": "YFINANCE", "source_id": "AAPL@2026-08-03"}],
+        "metrics": {"change_pct_1d": -5.2},
+        "occurrence_count": 1,
+        "first_seen_at": "2026-08-03T12:00:00+00:00",
+        "last_seen_at": "2026-08-03T12:00:00+00:00",
+        "fired_at": "2026-08-03T12:00:00+00:00",
+        "parent_alert_id": None,
+    }
+    alert.update(overrides)
+    return alert
+
+
+class TestWatchlist:
+    def test_add_then_list(self, temp_db):
+        from src.persistence.repository import add_watch_item, list_watchlist
+
+        add_watch_item("aapl", company_name="Apple Inc.")
+        rows = list_watchlist()
+        assert [r["ticker"] for r in rows] == ["AAPL"]
+        assert rows[0]["company_name"] == "Apple Inc."
+        assert not rows[0]["warmed_up"]
+
+    def test_remove_is_a_soft_delete(self, temp_db):
+        from src.persistence.repository import add_watch_item, list_watchlist, remove_watch_item
+
+        add_watch_item("AAPL")
+        assert remove_watch_item("AAPL")
+        assert list_watchlist() == []
+        assert [r["ticker"] for r in list_watchlist(active_only=False)] == ["AAPL"]
+
+    def test_removing_twice_reports_false(self, temp_db):
+        from src.persistence.repository import add_watch_item, remove_watch_item
+
+        add_watch_item("AAPL")
+        assert remove_watch_item("AAPL")
+        assert not remove_watch_item("AAPL")
+
+    def test_readding_does_not_reset_warmed_up(self, temp_db):
+        """
+        A ticker that already warmed up has its events in the dedup index.
+        Re-warming would re-upsert the same points and delay real alerts for a
+        whole cycle.
+        """
+        from src.persistence.repository import add_watch_item, mark_warmed_up, remove_watch_item
+
+        add_watch_item("AAPL")
+        mark_warmed_up(["AAPL"])
+        remove_watch_item("AAPL")
+
+        assert add_watch_item("AAPL")["warmed_up"]
+
+    def test_mark_warmed_up_ignores_unknown_tickers(self, temp_db):
+        from src.persistence.repository import add_watch_item, mark_warmed_up
+
+        add_watch_item("AAPL")
+        assert mark_warmed_up(["AAPL", "ZZZZ"]) == 1
+
+
+class TestCheckpoints:
+    def test_missing_checkpoint_is_absent_not_zero(self, temp_db):
+        """
+        A never-checked pair must be MISSING so the monitor falls back to its
+        default lookback. A zero timestamp would read as 1970 and pull the
+        company's entire filing history as "new".
+        """
+        from src.persistence.repository import get_checkpoints
+
+        assert get_checkpoints(["AAPL"]) == {}
+
+    def test_set_then_get_round_trips(self, temp_db):
+        from datetime import datetime, timezone
+
+        from src.persistence.repository import get_checkpoints, set_checkpoint
+
+        when = datetime(2026, 8, 1, 9, 30, tzinfo=timezone.utc)
+        set_checkpoint("aapl", "filing", when=when)
+
+        assert get_checkpoints(["AAPL"]) == {"AAPL:filing": when.isoformat()}
+
+    def test_second_set_advances_rather_than_duplicating(self, temp_db):
+        from datetime import datetime, timezone
+
+        from src.persistence.repository import get_checkpoints, set_checkpoint
+
+        set_checkpoint("AAPL", "filing", when=datetime(2026, 8, 1, tzinfo=timezone.utc))
+        set_checkpoint("AAPL", "filing", when=datetime(2026, 8, 2, tzinfo=timezone.utc))
+
+        checkpoints = get_checkpoints(["AAPL"])
+        assert len(checkpoints) == 1
+        assert checkpoints["AAPL:filing"].startswith("2026-08-02")
+
+    def test_keys_are_flat_strings_so_they_survive_checkpoint_serialisation(self, temp_db):
+        from src.persistence.repository import get_checkpoints, set_checkpoint
+
+        set_checkpoint("AAPL", "news")
+        key = next(iter(get_checkpoints()))
+        assert isinstance(key, str) and ":" in key
+
+
+class TestAlerts:
+    def test_record_then_read_back(self, temp_db):
+        from src.persistence.repository import get_alert, record_alert
+
+        record_alert(_alert(), cycle_id="c1")
+        row = get_alert("a1")
+
+        assert row is not None
+        assert row["ticker"] == "AAPL"
+        assert row["metrics"]["change_pct_1d"] == -5.2
+        assert row["evidence"][0]["source_id"] == "AAPL@2026-08-03"
+
+    def test_recording_the_same_id_upserts(self, temp_db):
+        from src.persistence.repository import list_alerts, record_alert
+
+        record_alert(_alert(), cycle_id="c1")
+        record_alert(_alert(severity="HIGH"), cycle_id="c2")
+
+        rows = list_alerts()
+        assert len(rows) == 1
+        assert rows[0]["severity"] == "HIGH"
+
+    def test_bump_increments_rather_than_inserting(self, temp_db):
+        from src.persistence.repository import bump_alert_occurrence, get_alert, list_alerts, record_alert
+
+        record_alert(_alert(), cycle_id="c1")
+        assert bump_alert_occurrence("a1") == 2
+        assert bump_alert_occurrence("a1") == 3
+
+        assert len(list_alerts()) == 1
+        assert get_alert("a1")["occurrence_count"] == 3
+
+    def test_bumping_an_unknown_alert_returns_zero_rather_than_raising(self, temp_db):
+        """
+        A Qdrant point can outlive its SQLite row — a restored database, a
+        hand-seeded index. That must not abort the cycle mid-flight.
+        """
+        from src.persistence.repository import bump_alert_occurrence
+
+        assert bump_alert_occurrence("ghost") == 0
+
+    def test_filters_compose(self, temp_db):
+        from src.persistence.repository import list_alerts, record_alert
+
+        record_alert(_alert(alert_id="a1", ticker="AAPL", severity="HIGH"), cycle_id="c1")
+        record_alert(_alert(alert_id="a2", ticker="MSFT", severity="LOW"), cycle_id="c1")
+
+        assert len(list_alerts(ticker="AAPL")) == 1
+        assert len(list_alerts(severity="HIGH")) == 1
+        assert len(list_alerts(ticker="MSFT", severity="HIGH")) == 0
+
+
+class TestDedupDecisions:
+    def test_fires_are_recorded_too_not_only_suppressions(self, temp_db):
+        """
+        The Phase 7 sweep needs negatives. A log of only suppressions can
+        justify the threshold that produced it and nothing else.
+        """
+        from src.persistence.repository import list_dedup_decisions, record_dedup_decisions
+
+        record_dedup_decisions(
+            [
+                {"ticker": "AAPL", "decision": "FIRE", "score": 0.0},
+                {"ticker": "AAPL", "decision": "SUPPRESS_SEMANTIC", "score": 0.94, "parent_alert_id": "a1"},
+            ],
+            cycle_id="c1",
+        )
+
+        rows = list_dedup_decisions()
+        assert {r["decision"] for r in rows} == {"FIRE", "SUPPRESS_SEMANTIC"}
+        assert next(r for r in rows if r["decision"] == "SUPPRESS_SEMANTIC")["score"] == 0.94
+
+    def test_empty_input_writes_nothing(self, temp_db):
+        from src.persistence.repository import record_dedup_decisions
+
+        assert record_dedup_decisions([], cycle_id="c1") == 0
+
+    def test_filter_by_decision(self, temp_db):
+        from src.persistence.repository import list_dedup_decisions, record_dedup_decisions
+
+        record_dedup_decisions(
+            [{"ticker": "AAPL", "decision": "FIRE"}, {"ticker": "MSFT", "decision": "MERGE"}],
+            cycle_id="c1",
+        )
+        assert len(list_dedup_decisions(decision="merge")) == 1
+
+
+class TestCycles:
+    def test_record_summarises_the_state(self, temp_db):
+        from src.persistence.repository import get_cycle, record_cycle
+
+        record_cycle(
+            {
+                "cycle_id": "c1",
+                "started_at": "2026-08-03T12:00:00+00:00",
+                "warmup": False,
+                "watchlist": [{"ticker": "AAPL"}, {"ticker": "MSFT"}],
+                "candidates": [1, 2, 3],
+                "fired": [1],
+                "suppressed": [1, 1],
+                "merged": [],
+                "monitor_errors": ["boom"],
+                "api_calls": [1, 1, 1, 1],
+            },
+            duration_ms=4200,
+        )
+
+        row = get_cycle("c1")
+        assert row is not None
+        assert row["tickers"] == ["AAPL", "MSFT"]
+        assert (row["candidate_count"], row["fired_count"], row["suppressed_count"]) == (3, 1, 2)
+        assert row["error_count"] == 1
+        assert row["duration_ms"] == 4200
+
+    def test_rerecording_a_cycle_upserts(self, temp_db):
+        from src.persistence.repository import list_cycles, record_cycle
+
+        state = {"cycle_id": "c1", "watchlist": [], "fired": []}
+        record_cycle(state, duration_ms=1)
+        record_cycle({**state, "fired": [1, 2]}, duration_ms=2)
+
+        rows = list_cycles()
+        assert len(rows) == 1
+        assert rows[0]["fired_count"] == 2
