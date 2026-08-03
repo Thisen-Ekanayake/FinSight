@@ -142,7 +142,11 @@ def get_news_rss(ticker: str, *, since: datetime) -> list[NewsItem]:
     for entry in feed.entries:
         parsed = entry.get("published_parsed")
         if parsed:
-            published = datetime(*parsed[:6], tzinfo=timezone.utc)
+            # Unpacked explicitly rather than as *parsed[:6]: a starred slice
+            # has an unknown length to a type checker, so it cannot rule out
+            # tzinfo being supplied twice.
+            year, month, day, hour, minute, second = parsed[:6]
+            published = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
         else:
             published = datetime.now(timezone.utc)
 
@@ -207,13 +211,17 @@ def get_company_news(
 
     from src.data.providers import run_chain
 
+    # Annotated so run_chain's element type is inferred from the default rather
+    # than from a bare [], which resolves to list[Never] and rejects every
+    # provider in the chain.
+    empty: list[NewsItem] = []
     result = run_chain(
         "news",
         {
             "finnhub": lambda: get_news_finnhub(ticker, since=since),
             "rss": lambda: get_news_rss(ticker, since=since),
         },
-        default=[],
+        default=empty,
     )
     return result.value
 
