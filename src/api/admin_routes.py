@@ -59,8 +59,12 @@ async def health(request: Request) -> HealthResponse:
     check that fails the whole service for a partial outage teaches its
     operator to ignore it.
     """
+    from src.monitor.config import MONITOR_SCHEDULER_ENABLED
+    from src.monitor.scheduler import next_run_at
+
     qdrant_client = getattr(request.app.state, "qdrant", None)
     checkpointer = getattr(request.app.state, "checkpointer", None)
+    scheduler = getattr(request.app.state, "monitor_scheduler", None)
     database_ok = _database_ok()
 
     return HealthResponse(
@@ -71,6 +75,8 @@ async def health(request: Request) -> HealthResponse:
         checkpointer=checkpointer is not None,
         qdrant=qdrant_client is not None,
         qdrant_detail=getattr(request.app.state, "qdrant_detail", "unknown"),
+        scheduler_enabled=MONITOR_SCHEDULER_ENABLED,
+        scheduler_next_run_at=next_run_at(scheduler),
     )
 
 

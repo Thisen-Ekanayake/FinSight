@@ -12,6 +12,7 @@
 #   CANONICAL_SUMMARY_PROMPT_SYSTEM / _USER
 #   DEDUP_ACTIVE_STATUSES, WARMUP_STATUS, PENDING_APPROVAL_STATUS
 #   NOTIFICATION_SINKS, EMAIL_*, ALERTS_LOG_PATH_NAME   (Phase 7 dispatcher)
+#   MONITOR_SCHEDULER_ENABLED                            (Phase 7 scheduler)
 #
 # ══ SEVERITY IS RULES, NOT LLM JUDGEMENT ══
 #   Only the one-line qualitative SUMMARY is generated. Severity itself is
@@ -264,3 +265,12 @@ EMAIL_TO: str = os.getenv("EMAIL_TO", "")
 EMAIL_APP_PASSWORD: str = os.getenv("EMAIL_APP_PASSWORD", "")
 EMAIL_SMTP_HOST: str = os.getenv("EMAIL_SMTP_HOST", "smtp.gmail.com")
 EMAIL_SMTP_PORT: int = int(os.getenv("EMAIL_SMTP_PORT", "465"))
+
+
+# ── Scheduler (Phase 7) ─────────────────────────────────
+# Off by default so `make api` does not silently start hitting EDGAR,
+# Finnhub, and yfinance on a timer the first time someone runs the server.
+# Enable once the watchlist has been warmed up — see run_monitor.sh --once
+# --warmup — and see src/monitor/scheduler.py for why it runs cadence off
+# MONITOR_CADENCE_HOURS inside the API process rather than a separate cron.
+MONITOR_SCHEDULER_ENABLED: bool = os.getenv("MONITOR_SCHEDULER_ENABLED", "false").lower() in {"1", "true", "yes"}

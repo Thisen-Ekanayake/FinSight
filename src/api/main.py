@@ -105,8 +105,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     The checkpointer's ``async with`` spans the whole yield: leaving that scope
     closes its connection, so anything narrower would hand the graph a dead
-    saver.
+    saver. The scheduler is started INSIDE that scope for the same reason —
+    every cycle it runs needs the same live checkpointer connection that
+    ``POST /monitor/cycles/{id}/resume`` expects to find a paused cycle in.
     """
+    from src.monitor.scheduler import start_scheduler, stop_scheduler
+
     configure_logging()
     configure_tracing()
     init_db()
@@ -118,9 +122,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.qdrant = client
         app.state.qdrant_detail = detail
         app.state.research_graph = build_research_graph(checkpointer=saver)
+        app.state.monitor_scheduler = start_scheduler(saver)
 
         logger.info("FinSight API ready (env=%s, qdrant=%s)", ENVIRONMENT, detail)
         yield
+
+        stop_scheduler(app.state.monitor_scheduler)
 
     logger.info("FinSight API stopped")
 

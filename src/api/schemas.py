@@ -175,6 +175,8 @@ class HealthResponse(BaseModel):
     checkpointer: bool
     qdrant: bool
     qdrant_detail: str
+    scheduler_enabled: bool
+    scheduler_next_run_at: str | None = None
 
 
 class BudgetOut(BaseModel):

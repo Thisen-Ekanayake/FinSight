@@ -202,6 +202,12 @@ class TestHealth:
     def test_names_the_llm_backend(self, client):
         assert client.get("/health").json()["llm_backend"] in {"vertex", "aistudio"}
 
+    def test_reports_the_scheduler_off_by_default(self, client):
+        """MONITOR_SCHEDULER_ENABLED defaults to false — no test should silently start hitting real data sources."""
+        body = client.get("/health").json()
+        assert body["scheduler_enabled"] is False
+        assert body["scheduler_next_run_at"] is None
+
 
 class TestQuery:
     def test_returns_the_verified_answer(self, client):
