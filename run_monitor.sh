@@ -11,10 +11,15 @@
 #   ./run_monitor.sh --watchlist          # show it
 #   ./run_monitor.sh --add TSLA
 #   ./run_monitor.sh --decisions          # why things were suppressed
+#   ./run_monitor.sh --pending            # cycles paused awaiting a HIGH-alert decision
+#   ./run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 #
 # Run --warmup once before the first real cycle. A cold dedup index has nothing
 # to match against, so cycle 1 would otherwise report every open filing, every
 # recent article, and every price move in one burst.
+#
+# A HIGH alert pauses --once (exit code 2) rather than dispatching it straight
+# away — see --pending / --resume above, or POST /monitor/cycles/{id}/resume.
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 

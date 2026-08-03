@@ -46,7 +46,7 @@
 #   ./run_monitor.sh --once --warmup
 #   ./run_monitor.sh --once
 #   ./run_monitor.sh --pending
-#   ./run_monitor.sh --approve <cycle_id> --alert <alert_id> [--alert <alert_id> ...]
+#   ./run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -493,6 +493,36 @@ def run_cycle(
     return result
 
 
+def pending_alerts_for(cycle_id: str, *, checkpointer: Any) -> list[Alert]:
+    """
+    The HIGH alerts one paused cycle is actually waiting on.
+
+    Reads the checkpointer directly rather than any SQLite row: the alerts
+    are not written to AlertRecord until persist_cycle_node runs, which is
+    exactly what has NOT happened yet for a paused cycle. This is the same
+    extraction resume_cycle uses to validate a decisions dict, pulled out so
+    the CLI and API can show a human what they are actually deciding on.
+
+    Returns
+    -------
+    list of Alert
+        Empty if the cycle does not exist or is not currently paused.
+    """
+    graph = build_monitor_graph(checkpointer=checkpointer)
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id_for(cycle_id)}}
+
+    snapshot = graph.get_state(config)
+    if not snapshot.next:
+        return []
+
+    by_id: dict[str, Alert] = {}
+    for task in snapshot.tasks:
+        for interrupt in task.interrupts:
+            for alert in (interrupt.value or {}).get("pending_approval", []):
+                by_id[alert["alert_id"]] = alert
+    return list(by_id.values())
+
+
 def resume_cycle(
     cycle_id: str,
     decisions: dict[str, str],
@@ -535,25 +565,20 @@ def resume_cycle(
     """
     from src.persistence.repository import record_cycle
 
-    graph = build_monitor_graph(checkpointer=checkpointer)
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id_for(cycle_id)}}
-
-    snapshot = graph.get_state(config)
-    if not snapshot.next:
+    pending = pending_alerts_for(cycle_id, checkpointer=checkpointer)
+    if not pending:
         raise ValueError(f"Cycle {cycle_id} is not paused — nothing to resume")
 
-    pending_ids = {
-        alert["alert_id"]
-        for task in snapshot.tasks
-        for interrupt in task.interrupts
-        for alert in (interrupt.value or {}).get("pending_approval", [])
-    }
+    pending_ids = {alert["alert_id"] for alert in pending}
     if set(decisions) != pending_ids:
         raise ValueError(
             f"decisions must cover exactly the pending alerts {sorted(pending_ids)}, got {sorted(decisions)}"
         )
 
     from langgraph.types import Command
+
+    graph = build_monitor_graph(checkpointer=checkpointer)
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id_for(cycle_id)}}
 
     started = time.monotonic()
     result: MonitorState = graph.invoke(Command(resume=decisions), config=config)
@@ -592,7 +617,7 @@ def cycle_report(state: MonitorState) -> str:
             lines.append(f"        {alert['detail'][:110]}")
             lines.append(f"        alert_id: {alert['alert_id']}")
         lines.append("")
-        lines.append(f"  Resolve with: ./run_monitor.sh --approve {cycle_id} --alert <id>  (repeatable, or --reject)")
+        lines.append(f"  Resolve with: ./run_monitor.sh --resume {cycle_id} --approve <id>  (repeatable, or --reject)")
         lines.append("")
         return "\n".join(lines)
 

@@ -487,6 +487,49 @@ class TestApprovalGate:
         assert result["dispatched"] == ["a2"]
 
 
+class TestPendingAlertsFor:
+    def test_a_cycle_that_never_ran_has_no_pending_alerts(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import pending_alerts_for
+
+        with patch("src.monitor.graph.build_monitor_graph", return_value=_approval_subgraph(InMemorySaver())):
+            assert pending_alerts_for("never-existed", checkpointer=InMemorySaver()) == []
+
+    def test_a_paused_cycle_returns_its_pending_alerts(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import pending_alerts_for
+
+        saver = InMemorySaver()
+        subgraph = _approval_subgraph(saver)
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"), cycle_id="c1")
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+        subgraph.invoke(state, {"configurable": {"thread_id": "monitor:c1"}})
+
+        with patch("src.monitor.graph.build_monitor_graph", return_value=subgraph):
+            pending = pending_alerts_for("c1", checkpointer=saver)
+
+        assert [a["alert_id"] for a in pending] == ["a1"]
+
+    def test_a_completed_cycle_has_no_pending_alerts(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import pending_alerts_for
+
+        saver = InMemorySaver()
+        subgraph = _approval_subgraph(saver)
+        state = new_cycle_state(watchlist("AAPL"), cycle_id="c2")
+        state["fired"] = []
+        state["pending_approval"] = []
+        subgraph.invoke(state, {"configurable": {"thread_id": "monitor:c2"}})
+
+        with patch("src.monitor.graph.build_monitor_graph", return_value=subgraph):
+            assert pending_alerts_for("c2", checkpointer=saver) == []
+
+
 class TestResumeCycle:
     def test_resuming_a_cycle_that_is_not_paused_raises(self, temp_db):
         from langgraph.checkpoint.memory import InMemorySaver

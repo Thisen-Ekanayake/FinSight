@@ -2,8 +2,8 @@
 # FinSight — Monitoring CLI
 # ═══════════════════════════════════════════════════════
 #
-# Purpose : Run a cycle, manage the watchlist, and inspect the dedup index
-#           from a shell.
+# Purpose : Run a cycle, manage the watchlist, decide paused approvals, and
+#           inspect the dedup index from a shell.
 #
 # Usage:
 #   python -m src.monitor.cli --once --warmup     # cold start: index, report nothing
@@ -13,12 +13,22 @@
 #   python -m src.monitor.cli --add TSLA --remove JPM
 #   python -m src.monitor.cli --decisions         # why things were suppressed
 #   python -m src.monitor.cli --prune
+#   python -m src.monitor.cli --pending           # cycles awaiting approval
+#   python -m src.monitor.cli --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 #
 # ══ RUN --warmup FIRST ══
 #   A cold dedup index has nothing to match against, so the first real cycle
 #   would report every open filing, every recent article, and every price move
 #   in one burst. --warmup does the same work and dispatches nothing, leaving
 #   cycle 2 with something to compare against.
+#
+# ══ WHY --once OPENS A CHECKPOINTER ══
+#   A HIGH alert pauses the graph via interrupt(), and interrupt() needs a
+#   checkpointer to have anything durable to pause INTO — without one the
+#   pause looks like it worked but produces a state nothing can ever resume.
+#   Every invocation here opens its own short-lived connection to the same
+#   checkpoint database the API uses (see src/persistence/checkpointer.py),
+#   the same pattern src/research/cli.py already uses for the same reason.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -78,6 +88,82 @@ def _print_decisions(limit: int) -> None:
     print()
 
 
+def _print_pending() -> None:
+    from src.persistence.repository import list_cycles
+
+    rows = list_cycles(status="PENDING_APPROVAL", limit=25)
+    if not rows:
+        print("\n  No cycles awaiting approval.\n")
+        return
+
+    from src.monitor.graph import pending_alerts_for
+    from src.persistence.checkpointer import sync_checkpointer
+
+    print(f"\n  {len(rows)} cycle(s) awaiting approval\n")
+    with sync_checkpointer() as saver:
+        for row in rows:
+            pending = pending_alerts_for(row["cycle_id"], checkpointer=saver)
+            print(f"  {row['cycle_id']}  ({len(pending)} alert(s))")
+            for alert in pending:
+                print(f"     {alert['ticker'] or 'MACRO':<6} {alert['headline']}")
+                print(f"            alert_id: {alert['alert_id']}")
+    print("\n  Resolve with: --resume <cycle_id> --approve <alert_id>  (repeatable, or --reject)\n")
+
+
+def _update_watchlist(add: list[str], remove: list[str]) -> None:
+    from src.monitor.watchlist import add_ticker, remove_ticker
+
+    for ticker in add:
+        item = add_ticker(ticker)
+        print(f"  + {item['ticker']:<6} {item['company_name']}")
+    for ticker in remove:
+        print(f"  - {ticker.upper():<6} {'removed' if remove_ticker(ticker) else 'was not being watched'}")
+    print()
+
+
+def _run_once(tickers: list[str] | None, warmup: bool) -> int:
+    from src.monitor.graph import cycle_report, run_cycle
+    from src.persistence.checkpointer import sync_checkpointer
+    from src.vectorstore.collections import ensure_collections
+
+    # The alerts collection may not exist yet on a fresh install, and a dedup
+    # search against a missing collection raises rather than returning nothing
+    # — which would look like a monitor bug.
+    ensure_collections()
+
+    # A checkpointer is what makes a pause resumable — see the module
+    # docstring. Opened here rather than held for the process's lifetime, same
+    # as research/cli.py: one CLI invocation, one connection.
+    with sync_checkpointer() as saver:
+        state = run_cycle(tickers=tickers, warmup=warmup, checkpointer=saver)
+    print(cycle_report(state))
+
+    if state.get("warmup"):
+        print("  Warmup complete. Run again WITHOUT --warmup to start alerting.\n")
+    elif "__interrupt__" in state:
+        return 2  # distinct from the error code — this is a normal, expected pause
+
+    return 1 if state.get("monitor_errors") else 0
+
+
+def _resume(cycle_id: str, approve: list[str], reject: list[str]) -> int:
+    from src.monitor.graph import cycle_report, resume_cycle
+    from src.persistence.checkpointer import sync_checkpointer
+
+    decisions = {alert_id: "approve" for alert_id in approve}
+    decisions.update({alert_id: "reject" for alert_id in reject})
+
+    with sync_checkpointer() as saver:
+        try:
+            state = resume_cycle(cycle_id, decisions, checkpointer=saver)
+        except ValueError as exc:
+            print(f"\n  {exc}\n")
+            return 1
+
+    print(cycle_report(state))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the monitoring subsystem from a shell."""
     parser = argparse.ArgumentParser(description="FinSight autonomous monitoring")
@@ -94,7 +180,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stats", action="store_true", help="show the alert index")
     parser.add_argument("--prune", action="store_true", help="delete alert points past the retention window")
 
+    parser.add_argument("--pending", action="store_true", help="show cycles awaiting approval, and their alerts")
+    parser.add_argument("--resume", metavar="CYCLE_ID", help="resume a paused cycle with --approve/--reject")
+    parser.add_argument("--approve", action="append", default=[], metavar="ALERT_ID", help="approve (repeatable)")
+    parser.add_argument("--reject", action="append", default=[], metavar="ALERT_ID", help="reject (repeatable)")
+
     args = parser.parse_args(argv)
+
+    if (args.approve or args.reject) and not args.resume:
+        parser.error("--approve/--reject require --resume <cycle_id>")
 
     from src.core.logging_setup import configure_logging
     from src.core.tracing import configure_tracing
@@ -105,14 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     init_db()
 
     if args.add or args.remove:
-        from src.monitor.watchlist import add_ticker, remove_ticker
-
-        for ticker in args.add or []:
-            item = add_ticker(ticker)
-            print(f"  + {item['ticker']:<6} {item['company_name']}")
-        for ticker in args.remove or []:
-            print(f"  - {ticker.upper():<6} {'removed' if remove_ticker(ticker) else 'was not being watched'}")
-        print()
+        _update_watchlist(args.add or [], args.remove or [])
 
     if args.watchlist:
         _print_watchlist()
@@ -132,24 +219,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n  {stats['name']:<24} {stats['status']:<10} points={stats['points']:,}")
         print(f"  {'':<24} indexed: {', '.join(stats['indexed_fields']) or 'none'}\n")
 
+    if args.pending:
+        _print_pending()
+
+    if args.resume:
+        return _resume(args.resume, args.approve, args.reject)
+
     if args.once:
-        from src.monitor.graph import cycle_report, run_cycle
-        from src.vectorstore.collections import ensure_collections
+        return _run_once(args.ticker, args.warmup)
 
-        # The alerts collection may not exist yet on a fresh install, and a
-        # dedup search against a missing collection raises rather than
-        # returning nothing — which would look like a monitor bug.
-        ensure_collections()
-
-        state = run_cycle(tickers=args.ticker, warmup=args.warmup)
-        print(cycle_report(state))
-
-        if state.get("warmup"):
-            print("  Warmup complete. Run again WITHOUT --warmup to start alerting.\n")
-
-        return 1 if state.get("monitor_errors") else 0
-
-    if not any([args.once, args.watchlist, args.add, args.remove, args.decisions, args.stats, args.prune]):
+    ran_something = any(
+        [args.once, args.watchlist, args.add, args.remove, args.decisions, args.stats, args.prune, args.pending]
+    )
+    if not ran_something:
         parser.print_help()
 
     return 0
