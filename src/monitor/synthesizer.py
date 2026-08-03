@@ -203,6 +203,41 @@ def alert_id_for(key: str) -> str:
     return str(uuid.uuid5(ALERT_NAMESPACE, key))
 
 
+# Corporate suffixes, so "Apple Inc." also matches a bare "Apple". Headlines
+# almost never use the registered name in full, and leaving the distinctive
+# half in place would put a term in the embedded text that is identical across
+# every candidate it could ever be compared against.
+# "&" is in the separator class for "JPMorgan Chase & Co."
+_CORPORATE_SUFFIX = re.compile(
+    r"[\s,&]+(?:inc|corp|corporation|co|company|ltd|limited|llc|l\.?p|plc|n\.?v|s\.?a|group|holdings?)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _entity_tokens(candidate: CandidateAlert) -> list[str]:
+    """
+    Names to remove from a headline before embedding it.
+
+    Longest first, so "Apple Inc" is consumed before a bare "Apple" can eat
+    half of it and leave "Inc." stranded.
+
+    Trailing periods are stripped from each token because a ``\\b`` after an
+    escaped "." never matches: a word boundary needs a word character on one
+    side, and "Apple Inc." followed by a space has neither.
+    """
+    tokens = {candidate["ticker"], candidate.get("company_name", "")}
+
+    company = candidate.get("company_name", "")
+    short = _CORPORATE_SUFFIX.sub("", company).strip()
+    # Only worth adding if it is still a real name — stripping the suffix off
+    # "Holdings Ltd" would leave a fragment that matches far too much.
+    if len(short) >= 3:
+        tokens.add(short)
+
+    cleaned = {token.strip().rstrip(".") for token in tokens if token.strip()}
+    return sorted((token for token in cleaned if token), key=len, reverse=True)
+
+
 # ── The deterministic fallback ──────────────────────────
 def template_summary(candidate: CandidateAlert) -> str:
     """
@@ -256,9 +291,8 @@ def template_summary(candidate: CandidateAlert) -> str:
         # The ticker and company name are attached separately and filtered
         # exactly, so leaving them in the embedded text only adds a term that
         # is identical across every candidate it could ever be compared to.
-        for token in (candidate["ticker"], candidate.get("company_name", "")):
-            if token:
-                summary = re.sub(rf"\b{re.escape(token)}\b", " ", summary, flags=re.IGNORECASE)
+        for token in _entity_tokens(candidate):
+            summary = re.sub(rf"\b{re.escape(token)}\b\.?", " ", summary, flags=re.IGNORECASE)
 
     words = re.sub(r"\s{2,}", " ", summary).strip(" ,;:-").lower().split()
     return " ".join(words[:MAX_SUMMARY_WORDS])

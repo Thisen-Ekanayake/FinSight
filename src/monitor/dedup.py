@@ -124,12 +124,77 @@ def _decision_record(
     )
 
 
+def check_exact(candidate: CandidateAlert, *, now: datetime | None = None) -> DedupOutcome | None:
+    """
+    Step 1 on its own: the free exact-key path.
+
+    Split out so ``deduplicate`` can run it across the WHOLE batch before
+    anything is summarised. That ordering is what makes the "zero cost" claim
+    true in practice rather than only per-candidate — see deduplicate.
+
+    Parameters
+    ----------
+    candidate : CandidateAlert
+    now : datetime, optional
+
+    Returns
+    -------
+    DedupOutcome or None
+        None means this event has not been seen and must go through the
+        semantic path.
+    """
+    moment = now or datetime.now(timezone.utc)
+    key = dedup_key(candidate)
+    alert_id = alert_id_for(key)
+
+    # Before embedding, before the LLM, before any search. The same accession
+    # number, the same article URL, the same day's price move in the same band.
+    existing = find_exact(key, alert_id=alert_id)
+    if existing is None:
+        return None
+
+    count = int(existing.get("occurrence_count", 1)) + 1
+    bump_occurrence(alert_id, count=count, last_seen_at=moment.isoformat())
+
+    canonical = existing.get("canonical_text", "")
+    reason = f"exact key match on {candidate['alert_type']} natural key"
+    logger.info("SUPPRESS_EXACT %s %s (seen %dx)", candidate["ticker"], candidate["alert_type"], count)
+
+    return DedupOutcome(
+        decision=Decision.SUPPRESS_EXACT,
+        reason=reason,
+        score=1.0,
+        alert=None,
+        suppression=SuppressionRecord(
+            ticker=candidate["ticker"],
+            alert_type=candidate["alert_type"],
+            headline=candidate["headline"],
+            canonical_text=canonical,
+            parent_alert_id=alert_id,
+            parent_headline=existing.get("headline", ""),
+            score=1.0,
+            reason=reason,
+        ),
+        record=_decision_record(
+            candidate,
+            decision=Decision.SUPPRESS_EXACT,
+            reason=reason,
+            severity=existing.get("severity", "LOW"),
+            key=key,
+            canonical=canonical,
+            score=1.0,
+            parent=existing,
+        ),
+    )
+
+
 def decide(
     candidate: CandidateAlert,
     *,
     summary: str,
     warmup: bool = False,
     now: datetime | None = None,
+    skip_exact: bool = False,
 ) -> DedupOutcome:
     """
     Run one candidate through the whole algorithm.
@@ -145,6 +210,11 @@ def decide(
         against it, but nothing is reported.
     now : datetime, optional
         Injected for tests, and threaded into the time-window filter.
+    skip_exact : bool, default False
+        Skip step 1 because the caller has already run it. Only ``deduplicate``
+        sets this, and only for candidates check_exact already returned None
+        for — running it twice would be harmless but would double the point
+        fetch on every survivor.
 
     Returns
     -------
@@ -154,47 +224,12 @@ def decide(
 
     moment = now or datetime.now(timezone.utc)
     key = dedup_key(candidate)
-    alert_id = alert_id_for(key)
 
     # ── 1. Exact-key fast path — free ───────────────────
-    # Before embedding, before the LLM, before any search. The same accession
-    # number, the same article URL, the same day's price move in the same band.
-    existing = find_exact(key, alert_id=alert_id)
-    if existing is not None:
-        count = int(existing.get("occurrence_count", 1)) + 1
-        stamp = moment.isoformat()
-        bump_occurrence(alert_id, count=count, last_seen_at=stamp)
-
-        canonical = existing.get("canonical_text", "")
-        reason = f"exact key match on {candidate['alert_type']} natural key"
-        logger.info("SUPPRESS_EXACT %s %s (seen %dx)", candidate["ticker"], candidate["alert_type"], count)
-
-        return DedupOutcome(
-            decision=Decision.SUPPRESS_EXACT,
-            reason=reason,
-            score=1.0,
-            alert=None,
-            suppression=SuppressionRecord(
-                ticker=candidate["ticker"],
-                alert_type=candidate["alert_type"],
-                headline=candidate["headline"],
-                canonical_text=canonical,
-                parent_alert_id=alert_id,
-                parent_headline=existing.get("headline", ""),
-                score=1.0,
-                reason=reason,
-            ),
-            record=_decision_record(
-                candidate,
-                decision=Decision.SUPPRESS_EXACT,
-                reason=reason,
-                severity=existing.get("severity", "LOW"),
-                key=key,
-                canonical=canonical,
-                score=1.0,
-                parent=existing,
-            ),
-        )
+    if not skip_exact:
+        exact = check_exact(candidate, now=moment)
+        if exact is not None:
+            return exact
 
     # ── 2. Severity BEFORE dedup — step 6 depends on it ──
     severity, severity_reason = severity_score(candidate)
@@ -221,16 +256,30 @@ def decide(
     )
     best_score, best = neighbours[0] if neighbours else (0.0, {})
 
-    # ── 6. Asymmetric-cost guardrail — checked BEFORE 5 ──
-    # Placed ahead of the suppression branches deliberately: a HIGH-severity
-    # event has to escape them, not be rescued afterwards. Missing a real 8-K
-    # Item 4.02 because it read like last week's costs far more than one
-    # duplicate ping.
+    # ── 6. Asymmetric-cost guardrail — evaluated BEFORE 5 acts ──
+    # The rule is not "a HIGH alert always fires". It is: A HIGH-SEVERITY EVENT
+    # MUST PRODUCE A REPORT UNLESS IT IS NEAR-IDENTICAL TO SOMETHING ALREADY
+    # REPORTED. Missing a real 8-K Item 4.02 because it read like last week's
+    # costs far more than one duplicate ping.
     #
-    # Only meaningful when there IS a neighbour — search_similar already floors
-    # its results at TAU_LOW, so an empty result set would reach FIRE anyway and
-    # labelling that a guardrail save would overstate what the rule did.
-    if neighbours and severity == "HIGH" and best_score < TAU_HIGH_SEVERITY_FORCE_FIRE:
+    # So it has to know which branches would REPORT NOTHING. Two do: a
+    # suppression, and a merge whose severity did not rise above its parent's.
+    # An ESCALATING merge already reaches the reader AND links to its parent
+    # AND moves the cluster centroid — overriding it with a bare FIRE would
+    # report the same thing while throwing all three away.
+    #
+    # Evaluated before step 5 runs so the override happens instead of the
+    # merge's side effects, not on top of them.
+    if best_score >= TAU_HIGH:
+        reports_nothing = True
+    elif best_score >= TAU_LOW:
+        reports_nothing = _RANK.get(severity, 0) <= _RANK.get(str(best.get("severity", "LOW")), 0)
+    else:
+        # No neighbour worth considering — step 5 fires anyway, and calling
+        # that a guardrail save would overstate what the rule did.
+        reports_nothing = False
+
+    if reports_nothing and severity == "HIGH" and best_score < TAU_HIGH_SEVERITY_FORCE_FIRE:
         reason = (
             f"HIGH severity ({severity_reason}) at {best_score:.3f}, below the "
             f"{TAU_HIGH_SEVERITY_FORCE_FIRE} force-fire floor"
@@ -422,14 +471,27 @@ def deduplicate(
     log_distribution: bool = False,
 ) -> list[DedupOutcome]:
     """
-    Run a whole cycle's candidates through the engine, in order.
+    Run a whole cycle's candidates through the engine, in two passes.
 
-    ══ ORDER MATTERS, AND SEQUENTIAL IS THE POINT ══
+    ══ PASS 1 IS FREE, AND HAS TO RUN FIRST ══
+    Every candidate gets the exact-key check before ANYTHING is summarised or
+    embedded. In steady state that resolves most of a cycle: the same filing
+    seen again, the same article re-served by the feed, the same day's price
+    move re-measured.
+
+    Running the batched summary call up front instead would be simpler and
+    would spend a `flash` call on every cycle whose candidates are all exact
+    duplicates — which, measured on a live run, is the ordinary case: 5 of 5
+    candidates resolved on the exact path, and the model had already been
+    called for all five. Cheap per cycle, and permanently wrong about what the
+    fast path costs.
+
+    ══ PASS 2 IS SEQUENTIAL, AND THAT IS THE POINT ══
     Each decision writes to the same index the next decision searches. Three
     outlets covering one story in a single cycle must collapse into one alert
-    plus two suppressions, and that only works if the first one is INDEXED
-    before the second one is searched. Parallelising this would race them all
-    against an empty index and fire three times.
+    plus two suppressions, and that only works if the first is INDEXED before
+    the second is SEARCHED. Parallelising would race them against an empty
+    index and fire three times.
 
     Parameters
     ----------
@@ -439,8 +501,8 @@ def deduplicate(
         Index everything, report nothing.
     now : datetime, optional
     summaries : list of str, optional
-        Pre-computed canonical summaries, aligned by position. Computed here
-        when omitted.
+        Pre-computed canonical summaries, aligned with ``candidates`` by
+        position. Computed for the survivors when omitted.
     log_distribution : bool, default False
         Log the full score distribution at INFO. Used for the first few cycles:
         if p90 sits above TAU_LOW, canonicalization has collapsed and every
@@ -454,16 +516,43 @@ def deduplicate(
     if not candidates:
         return []
 
-    # Summaries are computed for the WHOLE batch in one call, before the loop.
-    # Candidates that turn out to be exact duplicates will have theirs go
-    # unused — which is the cheap direction: one extra line in one batched
-    # `flash` call, versus serialising the loop behind N separate calls.
-    texts = summaries if summaries is not None else summarize(candidates)
+    # ── Pass 1: the free exact-key sweep ────────────────
+    resolved: dict[int, DedupOutcome] = {}
+    survivors: list[int] = []
 
-    outcomes: list[DedupOutcome] = []
     for index, item in enumerate(candidates):
-        summary = texts[index] if index < len(texts) else ""
-        outcomes.append(decide(item, summary=summary, warmup=warmup, now=now))
+        outcome = check_exact(item, now=now)
+        if outcome is not None:
+            resolved[index] = outcome
+        else:
+            survivors.append(index)
+
+    # ── Pass 2: one batched summary call, survivors only ──
+    texts: list[str]
+    if not survivors:
+        # Guarded rather than left to a summarize([]) that happens to return
+        # early. "No survivors means no model call" is a contract worth stating
+        # in the control flow.
+        logger.info("Dedup: %d candidates, all resolved on the exact path — no model call", len(candidates))
+        texts = []
+    elif summaries is not None:
+        # Indexed by ORIGINAL position: a caller supplying summaries aligned
+        # them with `candidates`, not with whichever subset survived pass 1.
+        texts = [summaries[i] if i < len(summaries) else "" for i in survivors]
+    else:
+        texts = summarize([candidates[i] for i in survivors])
+
+    for position, index in enumerate(survivors):
+        summary = texts[position] if position < len(texts) else ""
+        resolved[index] = decide(
+            candidates[index],
+            summary=summary,
+            warmup=warmup,
+            now=now,
+            skip_exact=True,
+        )
+
+    outcomes = [resolved[index] for index in range(len(candidates))]
 
     if log_distribution:
         _log_distribution(outcomes)

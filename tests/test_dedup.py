@@ -509,3 +509,71 @@ class TestPointIdentity:
         import uuid
 
         uuid.UUID(alert_id_for(dedup_key(candidate())))  # raises if malformed
+
+
+class TestTwoPassBatching:
+    def test_an_all_duplicate_cycle_never_calls_the_model(self, store):
+        """
+        Measured on a live run: 5 of 5 candidates resolved on the exact path,
+        and the batched summary call had already been made for all five.
+        Cheap per cycle, and permanently wrong about what the fast path costs.
+        """
+        candidates = [candidate(natural_key=f"k{i}") for i in range(3)]
+        deduplicate(candidates, now=NOW, summaries=[SUMMARY] * 3)
+
+        with patch.object(dedup_module, "summarize", side_effect=AssertionError("summarised a duplicate")):
+            outcomes = deduplicate(candidates, now=NOW)
+
+        assert [o.decision for o in outcomes] == [Decision.SUPPRESS_EXACT] * 3
+
+    def test_only_the_survivors_are_summarised(self, store):
+        deduplicate([candidate(natural_key="seen")], now=NOW, summaries=[SUMMARY])
+
+        summarised: list[int] = []
+
+        def record(items, **kwargs):
+            summarised.append(len(items))
+            return [SUMMARY] * len(items)
+
+        with patch.object(dedup_module, "summarize", side_effect=record):
+            deduplicate(
+                [candidate(natural_key="seen"), candidate(natural_key="new")],
+                now=NOW,
+            )
+
+        assert summarised == [1]
+
+    def test_outcomes_stay_in_input_order_across_both_passes(self, store):
+        deduplicate([candidate(natural_key="seen")], now=NOW, summaries=[SUMMARY])
+
+        outcomes = deduplicate(
+            [
+                candidate(natural_key="new-a"),
+                candidate(natural_key="seen"),
+                candidate(natural_key="new-b"),
+            ],
+            now=NOW,
+            summaries=["a summary", "unused", "b summary"],
+        )
+
+        assert [o.decision for o in outcomes] == [Decision.FIRE, Decision.SUPPRESS_EXACT, Decision.FIRE]
+        assert "a summary" in outcomes[0].alert["canonical_text"]
+        assert "b summary" in outcomes[2].alert["canonical_text"]
+
+    def test_supplied_summaries_stay_aligned_with_the_original_positions(self, store):
+        """
+        Regression guard: pass 2 iterates survivors, so a supplied summary list
+        has to be indexed by ORIGINAL position, not by survivor position.
+        """
+        deduplicate([candidate(ticker="AAPL", natural_key="seen")], now=NOW, summaries=["parent"])
+
+        outcomes = deduplicate(
+            [
+                candidate(ticker="AAPL", natural_key="seen"),
+                candidate(ticker="MSFT", natural_key="fresh"),
+            ],
+            now=NOW,
+            summaries=["belongs to the duplicate", "belongs to the new one"],
+        )
+
+        assert "belongs to the new one" in outcomes[1].alert["canonical_text"]

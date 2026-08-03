@@ -25,7 +25,7 @@ import time
 from src.core.schemas import make_citation
 from src.data.schemas import IndicatorSet
 from src.monitor.config import PRICE_MIN_PCT, PRICE_NOTABLE_VOLUME_RATIO
-from src.monitor.monitors._common import bucket, candidate, monitor
+from src.monitor.monitors._common import bucket, candidate, monitor, sentence
 from src.monitor.state import CandidateAlert
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ def _describe(indicators: IndicatorSet) -> str:
     if rsi is not None and (rsi <= 30 or rsi >= 70):
         parts.append(f"RSI {rsi:.0f} ({'oversold' if rsi <= 30 else 'overbought'})")
 
-    return "; ".join(parts).capitalize() + "."
+    return sentence(parts) + "."
 
 
 @monitor(MONITOR_NAME)

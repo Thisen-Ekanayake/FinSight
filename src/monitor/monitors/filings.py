@@ -33,8 +33,8 @@ import time
 from datetime import datetime
 
 from src.data.schemas import FilingRef
-from src.monitor.config import FILING_WATCHED_FORMS
-from src.monitor.monitors._common import candidate, monitor
+from src.monitor.config import FILING_HIGH_8K_ITEMS, FILING_MED_8K_ITEMS, FILING_WATCHED_FORMS
+from src.monitor.monitors._common import candidate, monitor, sentence
 from src.monitor.state import CandidateAlert
 
 logger = logging.getLogger(__name__)
@@ -78,17 +78,34 @@ def _describe(filing: FilingRef) -> str:
         ]
         parts.append("carrying " + ", ".join(described))
 
-    return "; ".join(parts).capitalize() + f". Accession {filing['accession_no']}."
+    return sentence(parts) + f". Accession {filing['accession_no']}."
+
+
+def _item_rank(code: str) -> int:
+    """Order item codes by how alarming they are. Higher is worse."""
+    if code in FILING_HIGH_8K_ITEMS:
+        return 2
+    if code in FILING_MED_8K_ITEMS:
+        return 1
+    return 0
 
 
 def _headline(filing: FilingRef) -> str:
-    """A one-line headline that leads with the most serious item code."""
+    """
+    A one-line headline led by the MOST SERIOUS item code.
+
+    Not the first one. The SEC lists items in numeric order, so an 8-K
+    carrying both a routine 8.01 and a 4.02 would otherwise be headlined
+    "other events" — burying a non-reliance disclosure behind a press release
+    in the one line most likely to be read.
+    """
     ticker = filing["ticker"]
     form = filing["form_type"]
 
-    for code in filing.get("items") or []:
-        if code in ITEM_DESCRIPTIONS:
-            return f"{ticker} filed an {form}: {ITEM_DESCRIPTIONS[code]}"
+    known = [code for code in filing.get("items") or [] if code in ITEM_DESCRIPTIONS]
+    if known:
+        worst = max(known, key=_item_rank)
+        return f"{ticker} filed an {form}: {ITEM_DESCRIPTIONS[worst]}"
 
     return f"{ticker} filed a {form}"
 

@@ -75,6 +75,19 @@ def candidate(
     )
 
 
+def sentence(parts: list[str]) -> str:
+    """
+    Join clauses into one sentence, capitalising ONLY the first character.
+
+    ``str.capitalize()`` lower-cases everything after the first character,
+    which turns "8-K" into "8-k", "RSI 28" into "rsi 28", and "Item 4.02" into
+    "item 4.02". Those are identifiers, and mangling them makes an alert read
+    as though the system does not know what it is looking at.
+    """
+    text = "; ".join(part for part in parts if part)
+    return (text[:1].upper() + text[1:]) if text else ""
+
+
 def bucket(value: float, size: float) -> int:
     """
     Round a magnitude down to a band, for use in a natural key.
