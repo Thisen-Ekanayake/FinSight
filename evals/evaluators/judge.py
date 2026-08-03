@@ -45,10 +45,26 @@ from src.core.schemas import AgentFinding
 
 logger = logging.getLogger(__name__)
 
-# Findings rendered into a judge prompt. Enough to check a citation against,
-# far short of pasting an entire filing into every graded call.
+# Findings rendered into a judge prompt.
+#
+# ══ WHY THE CHARACTER CAP MUST CLEAR A WHOLE CHUNK ══
+#   This was 400, chosen to keep prompts small. Every narrative finding is a
+#   retrieved filing chunk of up to CHUNK_SIZE (1200) characters plus a section
+#   header, so a 400-char cap truncated ALL of them — measured: 16 of 16 on a
+#   representative risk-factors query, lengths 415 to 1227.
+#
+#   The judge was therefore shown a third of each chunk and asked whether it
+#   supported a claim whose supporting sentence was frequently in the discarded
+#   remainder. It answered UNSUPPORTED, correctly, about evidence it could not
+#   see. citation_faithfulness on the narrative archetype was measuring this
+#   truncation rather than the system, and it did so silently across three
+#   experiments.
+#
+#   The cap now clears a full chunk with room for its header. 24 findings at
+#   this size is ~30k characters, comfortably inside the model's context — the
+#   prompt size this was protecting against was never a real constraint.
 MAX_JUDGE_FINDINGS: int = 24
-MAX_JUDGE_CLAIM_CHARS: int = 400
+MAX_JUDGE_CLAIM_CHARS: int = 1400
 
 
 def _render_findings(findings: list[AgentFinding]) -> str:

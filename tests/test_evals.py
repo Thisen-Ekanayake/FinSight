@@ -269,6 +269,39 @@ def test_the_correctness_judge_grades_against_the_reference():
     assert result["score"] == 1.0
 
 
+def test_the_judge_sees_a_whole_filing_chunk_without_truncation():
+    # The instrument defect. The cap was 400 characters while every narrative
+    # finding is a retrieved chunk of up to CHUNK_SIZE — measured, 16 of 16
+    # truncated on a real risk-factors query. The judge was shown a third of
+    # each chunk and asked whether it supported a claim whose supporting
+    # sentence was usually in the discarded remainder, so it said UNSUPPORTED,
+    # correctly, about evidence it could not see.
+    #
+    # Re-grading the same stored runs with the cap raised took narrative
+    # citation_faithfulness from 0.375 to 1.000. The system had been right all
+    # along; the evaluator was blindfolding its own judge.
+    from evals.evaluators.judge import MAX_JUDGE_CLAIM_CHARS, _render_findings
+    from src.vectorstore.config import CHUNK_SIZE
+
+    assert MAX_JUDGE_CLAIM_CHARS > CHUNK_SIZE
+
+    chunk = "AAPL 10-K FY2025 Item 1A (Risk Factors): " + ("supplier concentration. " * 50)
+    rendered = _render_findings([_finding(chunk)])
+
+    assert len(chunk) > 400, "fixture must be longer than the old cap or it proves nothing"
+    assert chunk in rendered
+
+
+def test_the_judge_prompt_still_bounds_a_runaway_finding():
+    # Unbounded is not the fix either — one malformed finding should not push
+    # an entire filing into every graded call.
+    from evals.evaluators.judge import MAX_JUDGE_CLAIM_CHARS, _render_findings
+
+    rendered = _render_findings([_finding("x" * 50_000)])
+
+    assert len(rendered) < MAX_JUDGE_CLAIM_CHARS + 500
+
+
 def test_a_failed_judge_call_leaves_the_example_ungraded_rather_than_failing_it():
     # -1.0 is the sentinel _grade() returns when the call raises. Turning that
     # into a 0.0 would blame the system for a network problem.
