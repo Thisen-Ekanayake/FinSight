@@ -33,6 +33,61 @@ CHUNK = FilingChunk(
 )
 
 
+class TestCollectionIsLateBound:
+    """
+    ══ THE TRAP THIS GUARDS ══
+    `collection: str = COLLECTION_FILINGS` binds the value when the module is
+    IMPORTED. Rebinding ingest.COLLECTION_FILINGS afterwards then changes the
+    module attribute and nothing else — every write still goes to the
+    production index.
+
+    It is the late-binding trap from evals/variants.py, one level worse: a
+    function default is out of reach of module-attribute patching entirely.
+
+    Nothing errors when it happens, because point IDs are deterministic — the
+    writes land on the real points and overwrite them with identical content.
+    A filing not already present would simply have been added to production.
+
+    These are unit tests on purpose. The integration tests below could not
+    catch it: with the writes going elsewhere, their throwaway collection was
+    empty and every count assertion passed vacuously.
+    """
+
+    def test_ingest_filing_reads_the_module_attribute_at_call_time(self):
+        import inspect
+
+        import src.vectorstore.ingest as ing
+
+        default = inspect.signature(ing.ingest_filing).parameters["collection"].default
+        assert default is None, "a non-None default freezes the collection at import time"
+
+    def test_ingest_ticker_and_already_ingested_do_too(self):
+        import inspect
+
+        import src.vectorstore.ingest as ing
+
+        for func in (ing.ingest_ticker, ing._already_ingested):
+            assert inspect.signature(func).parameters["collection"].default is None, func.__name__
+
+    def test_patching_the_module_attribute_redirects_the_scroll(self):
+        from unittest.mock import patch
+
+        import src.vectorstore.ingest as ing
+
+        captured = {}
+
+        class FakeClient:
+            def scroll(self, **kwargs):
+                captured.update(kwargs)
+                return [], None
+
+        with patch.object(ing, "COLLECTION_FILINGS", "finsight_somewhere_else"):
+            with patch("src.vectorstore.ingest.get_qdrant_client", return_value=FakeClient()):
+                ing._already_ingested("0000320193-25-000079")
+
+        assert captured["collection_name"] == "finsight_somewhere_else"
+
+
 class TestPointId:
     """
     Deterministic IDs are what make re-ingest an overwrite instead of a

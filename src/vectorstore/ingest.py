@@ -118,7 +118,7 @@ def ingest_filing(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     skip_existing: bool = False,
-    collection: str = COLLECTION_FILINGS,
+    collection: str | None = None,
     contextual: bool = True,
 ) -> IngestReport:
     """
@@ -134,8 +134,23 @@ def ingest_filing(
         Skip the filing entirely if any of its points are already present.
         Deterministic IDs make re-ingest harmless, so this is purely a time
         saver for large backfills.
-    collection : str, default COLLECTION_FILINGS
-        Target collection. Only the ablation twin should ever differ.
+    collection : str, optional
+        Target collection. Defaults to COLLECTION_FILINGS. Only the ablation
+        twin should ever differ.
+
+        ══ RESOLVED AT CALL TIME, NOT AS A DEFAULT ARGUMENT ══
+        `collection: str = COLLECTION_FILINGS` would bind the value when this
+        module is IMPORTED, so rebinding ingest.COLLECTION_FILINGS afterwards
+        would change the module attribute and nothing else. That is the same
+        late-binding trap documented in evals/variants.py, except a function
+        default is out of reach of module-attribute patching entirely.
+
+        It mattered: the integration tests point this at a throwaway
+        collection that way, and with a default argument every write went to
+        the production index instead. Nothing errored, because point IDs are
+        deterministic — the writes landed on the real AAPL points and
+        overwrote them with identical content. A filing NOT already present
+        would simply have been added.
     contextual : bool, default True
         Prepend the contextual header before embedding. False builds the
         ablation index — see COLLECTION_FILINGS_ABLATION.
@@ -152,6 +167,8 @@ def ingest_filing(
         A filing that fails to parse is skipped rather than raising — never
         ingest garbage.
     """
+    collection = collection or COLLECTION_FILINGS
+
     if not contextual and collection == COLLECTION_FILINGS:
         raise ValueError(
             "Refusing to write header-less vectors into the production collection: point IDs are "
@@ -225,9 +242,11 @@ def ingest_filing(
     return report(len(chunks), upserted)
 
 
-def _already_ingested(accession_no: str, *, collection: str = COLLECTION_FILINGS) -> bool:
+def _already_ingested(accession_no: str, *, collection: str | None = None) -> bool:
     """True if any point for this accession number already exists."""
     from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    collection = collection or COLLECTION_FILINGS
 
     client = get_qdrant_client()
     points, _ = client.scroll(
@@ -247,7 +266,7 @@ def ingest_ticker(
     limit: int = 4,
     since: date | None = None,
     skip_existing: bool = False,
-    collection: str = COLLECTION_FILINGS,
+    collection: str | None = None,
     contextual: bool = True,
 ) -> list[IngestReport]:
     """
