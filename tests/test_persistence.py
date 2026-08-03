@@ -460,3 +460,29 @@ class TestCycles:
         rows = list_cycles()
         assert len(rows) == 1
         assert rows[0]["fired_count"] == 2
+
+    def test_status_defaults_to_complete(self, temp_db):
+        from src.persistence.repository import get_cycle, record_cycle
+
+        record_cycle({"cycle_id": "c1", "watchlist": [], "fired": []}, duration_ms=1)
+        assert get_cycle("c1")["status"] == "COMPLETE"
+
+    def test_a_paused_cycle_is_recorded_pending_approval_then_flips_on_resume(self, temp_db):
+        """
+        The exact sequence run_cycle / resume_cycle produces: one row, upserted
+        twice, whose status is the queryable pointer into what the checkpointer
+        actually holds.
+        """
+        from src.persistence.repository import get_cycle, list_cycles, record_cycle
+
+        state = {"cycle_id": "c1", "watchlist": [], "fired": [1]}
+        record_cycle(state, duration_ms=50, status="PENDING_APPROVAL")
+
+        assert get_cycle("c1")["status"] == "PENDING_APPROVAL"
+        assert len(list_cycles(status="PENDING_APPROVAL")) == 1
+        assert len(list_cycles(status="COMPLETE")) == 0
+
+        record_cycle(state, duration_ms=5, status="COMPLETE")
+
+        assert get_cycle("c1")["status"] == "COMPLETE"
+        assert len(list_cycles(status="PENDING_APPROVAL")) == 0

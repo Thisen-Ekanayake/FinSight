@@ -323,6 +323,7 @@ class CycleRow(TypedDict):
     """One monitoring cycle, summarised."""
 
     cycle_id: str
+    status: str
     warmup: bool
     tickers: list[str]
     candidate_count: int
@@ -674,6 +675,7 @@ def list_dedup_decisions(*, limit: int = 200, decision: str | None = None) -> li
 def _to_cycle_row(cycle: MonitorCycle) -> CycleRow:
     return CycleRow(
         cycle_id=cycle.cycle_id,
+        status=cycle.status,
         warmup=cycle.warmup,
         tickers=[t for t in cycle.tickers.split(",") if t],
         candidate_count=cycle.candidate_count,
@@ -687,16 +689,27 @@ def _to_cycle_row(cycle: MonitorCycle) -> CycleRow:
     )
 
 
-def record_cycle(state: dict[str, Any], *, duration_ms: int) -> str:
+def record_cycle(state: dict[str, Any], *, duration_ms: int, status: str = "COMPLETE") -> str:
     """
-    Summarise one finished monitoring cycle.
+    Summarise one monitoring cycle — paused or finished.
+
+    Upserts on ``cycle_id``, so a cycle that pauses for approval and is later
+    resumed calls this TWICE: once with ``status="PENDING_APPROVAL"`` when
+    run_cycle's invoke() returns with an interrupt, and once with
+    ``status="COMPLETE"`` when resume_cycle finishes it. The second call
+    overwrites the counts recorded by the first — by then `fired`/`merged`
+    carry the post-decision truth (REJECTED alerts removed, dispatched ones
+    resolved), which the first call could not have known.
 
     Parameters
     ----------
     state : dict
-        The final MonitorState.
+        The (possibly partial) final MonitorState.
     duration_ms : int
-        Wall-clock duration.
+        Wall-clock duration of THIS invocation — the pause itself is not
+        counted, since a human may sit on a decision for hours or days.
+    status : str, default "COMPLETE"
+        "PENDING_APPROVAL" if the graph interrupted before persist_cycle ran.
 
     Returns
     -------
@@ -711,6 +724,7 @@ def record_cycle(state: dict[str, Any], *, duration_ms: int) -> str:
             cycle = MonitorCycle(cycle_id=cycle_id)
             session.add(cycle)
 
+        cycle.status = status
         cycle.warmup = bool(state.get("warmup", False))
         cycle.tickers = ",".join(item["ticker"] for item in state.get("watchlist", []))
         cycle.candidate_count = len(state.get("candidates", []))
@@ -725,14 +739,17 @@ def record_cycle(state: dict[str, Any], *, duration_ms: int) -> str:
         if started:
             cycle.started_at = datetime.fromisoformat(started)
 
-    logger.info("Recorded cycle %s (%d fired)", cycle_id, len(state.get("fired", [])))
+    logger.info("Recorded cycle %s (%s, %d fired)", cycle_id, status, len(state.get("fired", [])))
     return cycle_id
 
 
-def list_cycles(*, limit: int = 50) -> list[CycleRow]:
-    """Return recent cycles, newest first."""
+def list_cycles(*, limit: int = 50, status: str | None = None) -> list[CycleRow]:
+    """Return recent cycles, newest first, optionally filtered by status."""
     with session_scope() as session:
-        rows = session.scalars(select(MonitorCycle).order_by(MonitorCycle.started_at.desc()).limit(limit)).all()
+        statement = select(MonitorCycle).order_by(MonitorCycle.started_at.desc()).limit(limit)
+        if status:
+            statement = statement.where(MonitorCycle.status == status.upper())
+        rows = session.scalars(statement).all()
         return [_to_cycle_row(row) for row in rows]
 
 

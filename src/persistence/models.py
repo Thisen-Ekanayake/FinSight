@@ -271,12 +271,27 @@ class MonitorCycle(Base):
     ``cycle_id`` doubles as the checkpointer thread id (``monitor:{cycle_id}``),
     so a row here is the entry point into the full replayable state — the same
     relationship ResearchRun has with its thread.
+
+    ══ WHY status EXISTS WHEN THE CHECKPOINTER ALREADY KNOWS ══
+    The checkpointer remains the source of truth for what a paused cycle's
+    state actually IS. This column is only an INDEX into it: "which cycle_ids
+    are currently paused" would otherwise mean scanning every thread in the
+    checkpoint database and calling get_state() on each one. A single indexed
+    column answers `GET /monitor/cycles?status=PENDING_APPROVAL` for free, the
+    same way WatchItem.warmed_up is a queryable pointer rather than a second
+    copy of the watchlist's history.
     """
 
     __tablename__ = "monitor_cycles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cycle_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+
+    # PENDING_APPROVAL while a HIGH alert awaits a human decision, COMPLETE
+    # once persist_cycle_node has actually run. A cycle with no HIGH alerts
+    # goes straight to COMPLETE — human_approval_node is a pass-through when
+    # pending_approval is empty, so it never pauses at all.
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="COMPLETE", index=True)
 
     warmup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     tickers: Mapped[str] = mapped_column(String(256), nullable=False, default="")
