@@ -4,7 +4,7 @@
 
 Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), and **Google Gemini** (reasoning). All financial data comes from free, official sources.
 
-> Status: **Phase 5 complete** — the research subsystem is end-to-end (routed, fanned out, synthesised, **verified**, served over HTTP with a replayable audit trail) and now **measured**: 40 golden questions, 7 evaluators, and three named LangSmith experiments. See [the phase plan](#phases).
+> Status: **Phase 6 complete** — both subsystems are live. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, and **deduplicates** it semantically. See [the phase plan](#phases).
 
 ## Measured, not asserted
 
@@ -44,11 +44,45 @@ scores **1.000** had been reading 0.375 for three experiments.
 
 Full write-up: [`docs/eval_results.md`](./docs/eval_results.md).
 
+## The dedup engine
+
+Subsystem 2's centrepiece, and the part that measurement changed most.
+
+Embedding the display text is wrong in **both** directions:
+
+```
+"AAPL fell 5.2%"  vs  "AAPL fell 5.4%"     SAME event, different strings
+"AAPL fell 5.2%"  vs  "MSFT fell 5.2%"     DIFFERENT events, near-identical
+```
+
+So the embedded text is qualitative, and ticker/type are hard payload filters
+rather than soft semantic signals. Run against the real embedder, one story
+covered by three outlets plus two unrelated events:
+
+```
+ score  decision           headline
+ -----  -----------------  -----------------------------------------------
+   -    FIRE               Apple hit with DOJ antitrust probe over App Store
+ 0.913  SUPPRESS_SEMANTIC  Justice Department opens App Store inquiry
+ 0.898  SUPPRESS_SEMANTIC  Apple faces federal scrutiny of App Store rules
+ 0.811  MERGE              Apple sued by shareholders over disclosure
+   -    FIRE               Apple recalls MacBook adapters over fire risk
+   -    FIRE               MSFT hit with DOJ antitrust probe    (filtered out)
+```
+
+That run **refuted a design decision**. The plan said "never suppress a HIGH
+alert below 0.96 similarity" — but genuine paraphrases land at 0.90, so a 0.96
+floor does not prevent a missed event, it guarantees one page per outlet for
+every serious story. The rule is now about information rather than similarity:
+*a HIGH candidate fires unless the matched parent is already a reported HIGH.*
+
+Full write-up: [`docs/dedup_algorithm.md`](./docs/dedup_algorithm.md).
+
 ---
 
 ## What it does
 
-Two subsystems, 14 graph nodes, two `StateGraph`s.
+Two subsystems, 15 graph nodes, two `StateGraph`s. (Phase 7 adds two more.)
 
 ### 1. Interactive Research — request/response
 
@@ -73,7 +107,7 @@ START → router ──(Send: dynamic fan-out over agent × ticker)──┐
 
 ### 2. Autonomous Monitoring — scheduled, long-running
 
-Watches a ticker watchlist, deduplicates alerts by semantic similarity, and pauses for human approval on high-severity findings.
+Watches a ticker watchlist and deduplicates alerts by semantic similarity. Phase 7 adds the human-approval gate for high-severity findings.
 
 ```
 START → load_watchlist ──(Send: batched price/macro, per-ticker filings/news)──┐
@@ -84,14 +118,17 @@ START → load_watchlist ──(Send: batched price/macro, per-ticker filings/ne
                 └────────────────┴───────────────┴────────────────┘
                                         ▼
                         alert_synthesizer  (severity rules → Qdrant dedup)
-                                        │
-                     any HIGH? ─────────┼───────── no ─────────┐
-                                        ▼                      │
-                            human_approval (interrupt)         │
-                                        └──────────┬───────────┘
-                                                   ▼
-                                             dispatcher → persist_cycle → END
+                                        ▼
+                                 persist_cycle → END
+
+           ── Phase 7 inserts here ──────────────────────────────
+             any HIGH? → human_approval (interrupt) → dispatcher
 ```
+
+Five tickers is **12 branches, not 20**: price and macro batch into one `Send`
+each because their data sources take a list; filings and news are per-ticker
+because EDGAR and Finnhub are per-symbol. That asymmetry is the rate-limit
+strategy written as graph topology.
 
 ---
 
@@ -101,8 +138,9 @@ START → load_watchlist ──(Send: batched price/macro, per-ticker filings/ne
 - **Citation verification is deterministic first, LLM second.** A regex extracts every number from the draft answer and matches it against what the tools actually returned, within 0.5% tolerance. The LLM judge only rules on qualitative claims. An LLM checking its own arithmetic is circular.
 - **Grounding and accuracy are different metrics, and the gap between them is where the bugs live.** "Does this number match what a tool returned?" is a question the system answers with its own output — a stale tool passes it perfectly. So the eval suite scores answers against SEC XBRL as well, and that is the metric that moved: 0.725 → 0.957.
 - **Contextual chunk headers are kept, but they are not the win they were assumed to be.** Ablated against a twin index in Phase 5: they change 22% of retrieved chunks and change the answer not at all. Unfiltered they buy +0.02 on retrieving the right ticker, and in production they cannot matter for the entity at all, because `ticker` is a hard payload filter. Documented because a plausible, well-argued, unverified design decision is exactly what an eval suite is for.
-- **Alert dedup strips volatile numerics before embedding.** `"AAPL fell 5.2%"` and `"AAPL fell 5.4%"` are the same event; `"AAPL fell 5.2%"` and `"MSFT fell 5.2%"` are unrelated. So the embedded text is qualitative, and ticker/type are hard payload filters rather than soft semantic signals.
-- **Severity is deterministic rules, not LLM judgement.** An 8-K carrying Item 4.02 (non-reliance on previously issued financials) is automatically HIGH. This keeps severity testable and stops the model inflating urgency to seem useful.
+- **Alert dedup strips volatile numerics before embedding.** `"AAPL fell 5.2%"` and `"AAPL fell 5.4%"` are the same event; `"AAPL fell 5.2%"` and `"MSFT fell 5.2%"` are unrelated. So the embedded text is qualitative, and ticker/type are hard payload filters rather than soft semantic signals. The LLM writes the qualitative summary and its compliance is then *verified* with a regex — a summary carrying a magnitude is discarded rather than repaired.
+- **The dedup thresholds are not the tutorial's 0.7.** Two *unrelated* financial sentences score 0.65–0.78 with bge-small, and the payload filter has already constrained candidates to the same ticker and type — so the hard negatives are two different events sharing both, which still score ~0.73. A 0.7 threshold would suppress everything.
+- **Severity is deterministic rules, not LLM judgement.** An 8-K carrying Item 4.02 (non-reliance on previously issued financials) is automatically HIGH. This keeps severity testable, keeps it stable across months, and stops the model inflating urgency to seem useful — an alert stream whose severity drifts upward is one nobody reads, and a system nobody reads has a false-negative rate of 100%.
 - **Conflicting sources are surfaced, not silently resolved.** Beyond a 1% tolerance the answer says which sources disagreed and which was used.
 
 ---
@@ -126,6 +164,25 @@ make test                     # unit tests (no network, no LLM spend)
 ./run_research.sh "How did Apple's gross margin trend over the last three fiscal years?"
 ./run_api.sh                                            # then open localhost:8000/docs
 ```
+
+### Watch something
+
+```bash
+./run_monitor.sh --once --warmup    # FIRST RUN: index candidates, report nothing
+./run_monitor.sh --once             # a real cycle
+./run_monitor.sh --decisions        # every dedup decision, with its score
+```
+
+A cold dedup index makes every candidate look new, so cycle 1 without
+`--warmup` would report every open filing, article, and price move at once.
+
+```
+  Cycle 20260803T081205Z-66e0b9bd
+  5 candidates -> 0 fired, 5 suppressed (5 exact-key, 0 semantic)
+```
+
+The exact-key path costs no embedding and no LLM call — verified on a live
+cycle, which is how the batching bug that *was* spending one was found.
 
 ### Measure it
 
@@ -189,7 +246,7 @@ This machine already runs a Qdrant on **:6333** owned by another project. FinSig
 | 3 | ✅ Research graph: router + parallel specialists + aggregator | **LangGraph core** |
 | 4 | ✅ Citation verifier, repair loop, checkpointing, REST API | LangGraph checkpoints |
 | 5 | ✅ Eval suite A: 40 golden questions, 7 evaluators, measured iteration | **LangSmith evals** |
-| 6 | Monitoring subsystem + the dedup engine | LangGraph + Qdrant as a data structure |
+| 6 | ✅ Monitoring subsystem + the dedup engine | **LangGraph + Qdrant as a data structure** |
 | 7 | HITL `interrupt` gate, dispatcher, scheduler, eval suite B | Durable execution |
 | 8 | Streamlit dashboard, Docker, public deploy | Consolidation |
 | 9 | *(stretch)* Hybrid search — sparse + RRF fusion | Advanced Qdrant |
