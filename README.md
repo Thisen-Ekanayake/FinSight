@@ -4,7 +4,7 @@
 
 Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), and **Google Gemini** (reasoning). All financial data comes from free, official sources.
 
-> Status: **Phase 6 complete** — both subsystems are live. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, and **deduplicates** it semantically. See [the phase plan](#phases).
+> Status: **Phase 7 complete** — both subsystems are live. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, **deduplicates** it semantically, and now gates every HIGH-severity finding behind a **durable human-approval interrupt** before dispatching it to console, file, or email. See [the phase plan](#phases).
 
 ## Measured, not asserted
 
@@ -82,7 +82,7 @@ Full write-up: [`docs/dedup_algorithm.md`](./docs/dedup_algorithm.md).
 
 ## What it does
 
-Two subsystems, 15 graph nodes, two `StateGraph`s. (Phase 7 adds two more.)
+Two subsystems, 17 graph nodes, two `StateGraph`s.
 
 ### 1. Interactive Research — request/response
 
@@ -107,7 +107,7 @@ START → router ──(Send: dynamic fan-out over agent × ticker)──┐
 
 ### 2. Autonomous Monitoring — scheduled, long-running
 
-Watches a ticker watchlist and deduplicates alerts by semantic similarity. Phase 7 adds the human-approval gate for high-severity findings.
+Watches a ticker watchlist, deduplicates alerts by semantic similarity, and pauses every HIGH-severity finding for a human to decide before anything is dispatched.
 
 ```
 START → load_watchlist ──(Send: batched price/macro, per-ticker filings/news)──┐
@@ -119,16 +119,35 @@ START → load_watchlist ──(Send: batched price/macro, per-ticker filings/ne
                                         ▼
                         alert_synthesizer  (severity rules → Qdrant dedup)
                                         ▼
+                       human_approval  (interrupt() iff a HIGH is pending)
+                                        ▼
+                         dispatcher  (console / file / email)
+                                        ▼
                                  persist_cycle → END
-
-           ── Phase 7 inserts here ──────────────────────────────
-             any HIGH? → human_approval (interrupt) → dispatcher
 ```
 
 Five tickers is **12 branches, not 20**: price and macro batch into one `Send`
 each because their data sources take a list; filings and news are per-ticker
 because EDGAR and Finnhub are per-symbol. That asymmetry is the rate-limit
 strategy written as graph topology.
+
+A HIGH alert pauses the graph rather than dispatching it straight away —
+`graph.invoke()` returns immediately with the run checkpointed to disk, and
+the process can restart before anyone decides. A later call with
+`Command(resume=decisions)` continues the SAME run from exactly where it
+stopped:
+
+```bash
+./run_monitor.sh --once                                       # may pause: exit code 2
+./run_monitor.sh --pending                                    # what's waiting, and on what
+./run_monitor.sh --resume <cycle_id> --approve <id> --reject <id>
+curl -X POST localhost:8000/monitor/cycles/<cycle_id>/resume -d '{"decisions": {"<id>": "approve"}}'
+```
+
+An optional in-process scheduler (`MONITOR_SCHEDULER_ENABLED=true`) runs a
+cycle automatically on `MONITOR_CADENCE_HOURS`, inside the API's own event
+loop — off by default so starting the server does not silently begin hitting
+EDGAR, Finnhub, and yfinance on a timer.
 
 ---
 
@@ -140,7 +159,9 @@ strategy written as graph topology.
 - **Contextual chunk headers are kept, but they are not the win they were assumed to be.** Ablated against a twin index in Phase 5: they change 22% of retrieved chunks and change the answer not at all. Unfiltered they buy +0.02 on retrieving the right ticker, and in production they cannot matter for the entity at all, because `ticker` is a hard payload filter. Documented because a plausible, well-argued, unverified design decision is exactly what an eval suite is for.
 - **Alert dedup strips volatile numerics before embedding.** `"AAPL fell 5.2%"` and `"AAPL fell 5.4%"` are the same event; `"AAPL fell 5.2%"` and `"MSFT fell 5.2%"` are unrelated. So the embedded text is qualitative, and ticker/type are hard payload filters rather than soft semantic signals. The LLM writes the qualitative summary and its compliance is then *verified* with a regex — a summary carrying a magnitude is discarded rather than repaired.
 - **The dedup thresholds are not the tutorial's 0.7.** Two *unrelated* financial sentences score 0.65–0.78 with bge-small, and the payload filter has already constrained candidates to the same ticker and type — so the hard negatives are two different events sharing both, which still score ~0.73. A 0.7 threshold would suppress everything.
+- **The threshold sweep found the bands are precision-safe and recall-fragile, not "correct."** `./run_evals.sh alerts` measured zero false suppressions at TAU_HIGH=0.89 across 140 hand-labelled pairs — and zero true positives too: real paraphrasing is close enough to the line that a single word choice moves a near-duplicate pair from >0.89 to well under it. The threshold is a high-confidence duplicate filter, not a general "same event" detector; most real recall comes from the free exact-key path and the MERGE band, not from TAU_HIGH alone. See [`docs/dedup_algorithm.md`](docs/dedup_algorithm.md#the-threshold-sweep-run-for-real).
 - **Severity is deterministic rules, not LLM judgement.** An 8-K carrying Item 4.02 (non-reliance on previously issued financials) is automatically HIGH. This keeps severity testable, keeps it stable across months, and stops the model inflating urgency to seem useful — an alert stream whose severity drifts upward is one nobody reads, and a system nobody reads has a false-negative rate of 100%.
+- **A HIGH alert cannot reach a reader without a human in the loop.** `human_approval_node` calls LangGraph's `interrupt()` only when there is something HIGH pending — a pure pass-through otherwise, so most cycles never pause. The pause survives a process restart because the graph is checkpointed to SQLite, which is also why `run_cycle` refuses to run silently without a checkpointer: without one the pause "succeeds" but produces a state nothing can ever resume.
 - **Conflicting sources are surfaced, not silently resolved.** Beyond a 1% tolerance the answer says which sources disagreed and which was used.
 
 ---
@@ -169,8 +190,10 @@ make test                     # unit tests (no network, no LLM spend)
 
 ```bash
 ./run_monitor.sh --once --warmup    # FIRST RUN: index candidates, report nothing
-./run_monitor.sh --once             # a real cycle
+./run_monitor.sh --once             # a real cycle — exit code 2 if a HIGH alert paused it
 ./run_monitor.sh --decisions        # every dedup decision, with its score
+./run_monitor.sh --pending          # cycles paused awaiting a HIGH-alert decision
+./run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 ```
 
 A cold dedup index makes every candidate look new, so cycle 1 without
@@ -190,6 +213,7 @@ cycle, which is how the batching bug that *was* spending one was found.
 make evals                    # baseline over all 40 golden questions
 make evals V=k12              # one named single-variable experiment
 make evals-check              # is the committed golden dataset current?
+make evals-alerts             # Suite B: the dedup TAU_HIGH threshold sweep
 
 # Changed an evaluator rather than the system? Re-score stored runs instead of
 # paying for the graph again — the target outputs are identical, so any
@@ -199,7 +223,9 @@ make evals-check              # is the committed golden dataset current?
 
 An eval run is the largest quota spike in this project — ~320 LLM calls in one
 batch. `run_evals.sh` prints the estimated calls, minutes, and dollars, and
-waits for confirmation before spending anything.
+waits for confirmation before spending anything. Suite B is the exception: it
+scores hand-labelled text with the local embedder, no LLM call anywhere in
+it, so it costs nothing and runs with no confirmation prompt.
 
 Both doors write to the same checkpoint database, so a question asked at the CLI is replayable at `GET /research/threads/{thread_id}`.
 
@@ -247,7 +273,7 @@ This machine already runs a Qdrant on **:6333** owned by another project. FinSig
 | 4 | ✅ Citation verifier, repair loop, checkpointing, REST API | LangGraph checkpoints |
 | 5 | ✅ Eval suite A: 40 golden questions, 7 evaluators, measured iteration | **LangSmith evals** |
 | 6 | ✅ Monitoring subsystem + the dedup engine | **LangGraph + Qdrant as a data structure** |
-| 7 | HITL `interrupt` gate, dispatcher, scheduler, eval suite B | Durable execution |
+| 7 | ✅ HITL `interrupt` gate, dispatcher, scheduler, eval suite B | **Durable execution** |
 | 8 | Streamlit dashboard, Docker, public deploy | Consolidation |
 | 9 | *(stretch)* Hybrid search — sparse + RRF fusion | Advanced Qdrant |
 

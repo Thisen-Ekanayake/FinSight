@@ -48,7 +48,7 @@ from src.research.graph import build_research_graph
 logger = logging.getLogger(__name__)
 
 API_TITLE = "FinSight"
-API_VERSION = "0.6.0"
+API_VERSION = "0.7.0"
 API_DESCRIPTION = """
 Multi-agent financial research with enforced citations.
 
@@ -57,13 +57,16 @@ parallel, merged with source-trust conflict resolution, and then **verified** �
 every number in the answer is matched against a value some tool actually
 returned before the answer is released.
 
-A second subsystem watches a ticker list on a schedule, scores what it finds
-by rule, and **deduplicates** it against everything already reported — so the
-same event covered by three outlets arrives once.
+A second subsystem watches a ticker list on a schedule (or automatically —
+see `MONITOR_SCHEDULER_ENABLED`), scores what it finds by rule, and
+**deduplicates** it against everything already reported. Every HIGH-severity
+finding pauses for a human decision — durably, via a LangGraph `interrupt()`
+checkpointed to disk — before it reaches console, file, or email.
 
 * `POST /research/query` — ask a question
 * `GET /research/threads/{thread_id}` — replay the run's full audit trail
-* `POST /monitor/cycles` — run a monitoring cycle now
+* `POST /monitor/cycles` — run a monitoring cycle now (may pause for approval)
+* `POST /monitor/cycles/{cycle_id}/resume` — decide a paused cycle's HIGH alerts
 * `GET /monitor/decisions` — every dedup decision, with the score behind it
 * `GET /admin/budgets` — daily API usage
 """
