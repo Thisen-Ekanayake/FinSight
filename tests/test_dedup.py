@@ -406,6 +406,59 @@ class TestHighSeverityGuardrail:
         assert decide(item, summary=SUMMARY, now=NOW).decision == Decision.SUPPRESS_EXACT
 
 
+class TestApprovalStatus:
+    """
+    Phase 7: a HIGH-severity, non-warmup alert is written PENDING_APPROVAL
+    rather than FIRED, so the Qdrant index already reflects "raised but not
+    yet shown to a reader" the moment the point is upserted — before the
+    graph even reaches human_approval_node.
+    """
+
+    def test_a_high_severity_fire_is_written_pending_approval(self, store):
+        alarming = {"form_type": "8-K", "items": ["4.02"]}
+        outcome = decide(candidate(alert_type="NEW_FILING", metrics=alarming), summary=SUMMARY, now=NOW)
+
+        assert outcome.alert["severity"] == "HIGH"
+        assert outcome.alert["status"] == "PENDING_APPROVAL"
+        assert store.points[outcome.alert["alert_id"]]["status"] == "PENDING_APPROVAL"
+
+    def test_a_low_or_med_fire_is_written_fired(self, store):
+        routine = {"form_type": "10-K", "items": []}
+        outcome = decide(candidate(alert_type="NEW_FILING", metrics=routine), summary=SUMMARY, now=NOW)
+
+        assert outcome.alert["severity"] != "HIGH"
+        assert outcome.alert["status"] == "FIRED"
+
+    def test_an_escalating_merge_is_also_pending_approval(self, store):
+        """
+        _merge() builds its escalation from ``dict(alert)`` — the same alert
+        decide() already stamped with the approval-gated status. A parent
+        stuck at PENDING_APPROVAL_STATUS's FIRED sibling would be a copy-paste
+        gap between the two code paths that produce a reportable Alert.
+        """
+        store.next_score = (TAU_LOW + TAU_HIGH) / 2
+        routine = {"form_type": "10-K", "items": []}
+        alarming = {"form_type": "8-K", "items": ["4.02"]}
+
+        decide(candidate(alert_type="NEW_FILING", natural_key="a", metrics=routine), summary=SUMMARY, now=NOW)
+        outcome = decide(
+            candidate(alert_type="NEW_FILING", natural_key="b", metrics=alarming),
+            summary=SUMMARY,
+            now=NOW,
+        )
+
+        assert outcome.decision == Decision.ESCALATE
+        assert outcome.alert["status"] == "PENDING_APPROVAL"
+
+    def test_warmup_overrides_severity(self, store):
+        """A cycle whose whole purpose is not to report anything has nothing to approve either."""
+        alarming = {"form_type": "8-K", "items": ["4.02"]}
+        outcome = decide(candidate(alert_type="NEW_FILING", metrics=alarming), summary=SUMMARY, warmup=True, now=NOW)
+
+        assert outcome.decision == Decision.WARMUP
+        assert store.points[alert_id_for(dedup_key(candidate(alert_type="NEW_FILING")))]["status"] == "WARMUP"
+
+
 class TestWarmup:
     def test_warmup_indexes_but_reports_nothing(self, store):
         outcome = decide(candidate(), summary=SUMMARY, warmup=True, now=NOW)

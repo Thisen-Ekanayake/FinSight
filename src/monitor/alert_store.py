@@ -10,6 +10,7 @@
 #   upsert_alert(alert, vector)          write or overwrite one point
 #   bump_occurrence(alert_id, ...)       payload mutation, no re-embed
 #   update_centroid(alert_id, vector)    running mean of the cluster
+#   update_status(alert_id, status)      payload mutation, no re-embed (Phase 7)
 #   prune_expired(now)                   retention sweep
 #   alert_stats()                        collection snapshot
 #
@@ -327,6 +328,40 @@ def update_centroid(alert_id: str, vector: list[float]) -> bool:
     client.upsert(
         collection_name=ALERT_COLLECTION,
         points=[PointStruct(id=alert_id, vector=centroid, payload=points[0].payload or {})],
+        wait=True,
+    )
+    return True
+
+
+def update_status(alert_id: str, status: str) -> bool:
+    """
+    Flip a point's status WITHOUT touching its vector — a human's approval or
+    rejection, not a re-observation.
+
+    ``set_payload`` rather than ``upsert`` for the same reason as
+    ``bump_occurrence``: the vector has not changed, and re-sending it would
+    both re-embed nothing and risk overwriting a centroid a concurrent merge
+    has already moved.
+
+    Returns
+    -------
+    bool
+        False if the point has disappeared (pruned while awaiting approval),
+        which is a race to log rather than an error to raise — the SQLite
+        AlertRecord is still updated by the caller regardless.
+    """
+    from src.vectorstore.client import get_qdrant_client
+
+    client = get_qdrant_client()
+    points = client.retrieve(collection_name=ALERT_COLLECTION, ids=[alert_id], with_payload=False)
+    if not points:
+        logger.warning("Status update to %s skipped — point %s no longer exists", status, alert_id)
+        return False
+
+    client.set_payload(
+        collection_name=ALERT_COLLECTION,
+        payload={"status": status},
+        points=[alert_id],
         wait=True,
     )
     return True

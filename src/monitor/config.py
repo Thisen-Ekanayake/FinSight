@@ -10,7 +10,7 @@
 #   MONITOR_NAMES, DEFAULT_WATCHLIST, MONITOR_CADENCE_HOURS
 #   PRICE_*, FILING_*, NEWS_*, MACRO_*        severity thresholds
 #   CANONICAL_SUMMARY_PROMPT_SYSTEM / _USER
-#   DEDUP_ACTIVE_STATUSES, WARMUP_STATUS
+#   DEDUP_ACTIVE_STATUSES, WARMUP_STATUS, PENDING_APPROVAL_STATUS
 #
 # ══ SEVERITY IS RULES, NOT LLM JUDGEMENT ══
 #   Only the one-line qualitative SUMMARY is generated. Severity itself is
@@ -64,6 +64,11 @@ MAX_LOOKBACK_DAYS: int = 14
 # ── Alert status vocabulary ─────────────────────────────
 WARMUP_STATUS: str = "WARMUP"
 
+# A HIGH-severity, non-warmup alert lands here instead of FIRED, and stays
+# there until a human resolves it — see src/monitor/graph.py human_approval_node.
+PENDING_APPROVAL_STATUS: str = "PENDING_APPROVAL"
+REJECTED_STATUS: str = "REJECTED"
+
 # Statuses whose Qdrant points participate in dedup.
 #
 # WARMUP is included deliberately, and the plan's original filter omitted it.
@@ -72,7 +77,15 @@ WARMUP_STATUS: str = "WARMUP"
 # which produces a system that looks like it has a cold-start guard and does
 # not. PENDING_APPROVAL is included because an alert awaiting a human decision
 # has already been raised — a duplicate of it is still a duplicate.
-DEDUP_ACTIVE_STATUSES: tuple[str, ...] = ("FIRED", "PENDING_APPROVAL", WARMUP_STATUS)
+#
+# REJECTED is deliberately EXCLUDED. A human declining to raise an alert says
+# nothing about whether the next candidate describing it is worth raising —
+# unlike a suppression, a rejection carries no information about what the
+# event WAS, only that this particular report of it should not have paged
+# anyone. Keeping it dedup-active would let one rejection silently veto every
+# future report of the same event, which is the false-suppress failure this
+# whole engine is built to avoid.
+DEDUP_ACTIVE_STATUSES: tuple[str, ...] = ("FIRED", PENDING_APPROVAL_STATUS, WARMUP_STATUS)
 
 
 # ── Price severity ──────────────────────────────────────

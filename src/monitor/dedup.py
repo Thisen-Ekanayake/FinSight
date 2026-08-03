@@ -59,7 +59,7 @@ from typing import Any, NamedTuple
 
 from src.core.schemas import Severity
 from src.monitor.alert_store import bump_occurrence, find_exact, search_similar, update_centroid, upsert_alert
-from src.monitor.config import WARMUP_STATUS
+from src.monitor.config import PENDING_APPROVAL_STATUS, WARMUP_STATUS
 from src.monitor.severity import score as severity_score
 from src.monitor.state import Alert, CandidateAlert, DecisionRecord, SuppressionRecord
 from src.monitor.synthesizer import alert_id_for, build_alert, dedup_key, summarize
@@ -68,6 +68,29 @@ from src.vectorstore.config import TAU_HIGH, TAU_LOW
 logger = logging.getLogger(__name__)
 
 _RANK: dict[str, int] = {"LOW": 0, "MED": 1, "HIGH": 2}
+
+
+def _initial_status(severity: Severity, warmup: bool) -> str:
+    """
+    The status a newly-written alert point starts in.
+
+    ══ WHY THIS AND NOT A BARE "FIRED" ══
+    A HIGH-severity finding does not get to page anyone until a human has
+    seen it — that is Phase 7's approval gate. Routing it through
+    PENDING_APPROVAL here, at the moment the point is upserted, means the
+    Qdrant index already reflects the pending decision before the graph even
+    reaches human_approval_node: a second candidate describing the same event
+    while the first is still awaiting approval correctly suppresses against
+    it, because PENDING_APPROVAL is in DEDUP_ACTIVE_STATUSES.
+
+    warmup outranks severity: an observe-only cycle reports nothing at any
+    severity, so there is nothing to approve.
+    """
+    if warmup:
+        return WARMUP_STATUS
+    if severity == "HIGH":
+        return PENDING_APPROVAL_STATUS
+    return "FIRED"
 
 
 class Decision:
@@ -241,7 +264,7 @@ def decide(
         candidate,
         severity=severity,
         summary=summary,
-        status=WARMUP_STATUS if warmup else "FIRED",
+        status=_initial_status(severity, warmup),
         now=moment.isoformat(),
     )
     vector = get_embedder().embed_symmetric(alert["canonical_text"])
