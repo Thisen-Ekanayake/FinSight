@@ -156,6 +156,7 @@ def search_filings(
     until: date | None = None,
     limit: int = DEFAULT_SEARCH_LIMIT,
     score_threshold: float | None = None,
+    collection: str = COLLECTION_FILINGS,
 ) -> list[FilingHit]:
     """
     Semantic search over ingested filing narrative.
@@ -176,6 +177,10 @@ def search_filings(
         Drop hits below this cosine score. Leave unset by default: bge
         similarity has an inflated floor, so a naive threshold discards
         genuinely relevant chunks.
+    collection : str, default COLLECTION_FILINGS
+        Which index to search. Payloads are identical across the ablation
+        twin, so a hit is interchangeable whichever index produced it — only
+        WHICH chunks come back differs.
 
     Returns
     -------
@@ -186,7 +191,7 @@ def search_filings(
     vector = get_embedder().embed_query(query)
 
     response = client.query_points(
-        collection_name=COLLECTION_FILINGS,
+        collection_name=collection,
         query=vector,
         query_filter=build_filter(
             ticker=ticker,

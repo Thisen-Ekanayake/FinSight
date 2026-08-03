@@ -22,10 +22,16 @@ import time
 
 from src.research.agents._common import finding, specialist, tool_record
 from src.research.config import FILINGS_TOP_K
+from src.vectorstore.config import COLLECTION_FILINGS
 
 logger = logging.getLogger(__name__)
 
 AGENT = "filings_rag"
+
+# Which index this specialist reads. A module-level name rather than the
+# search default, so the contextual-header ablation can point it at the twin
+# collection for one experiment without editing any call site.
+SEARCH_COLLECTION: str = COLLECTION_FILINGS
 
 # Keyword -> Item sections. Narrowing the search to the right section is a
 # large precision win: "what risks?" should not surface the business
@@ -88,6 +94,7 @@ def filings_rag_node(payload: dict, ticker: str) -> tuple[list, list, list]:
         ticker=ticker,
         item_sections=sections,
         limit=FILINGS_TOP_K,
+        collection=SEARCH_COLLECTION,
     )
     elapsed = int((time.monotonic() - started) * 1000)
 
@@ -95,7 +102,7 @@ def filings_rag_node(payload: dict, ticker: str) -> tuple[list, list, list]:
         tool_record(
             AGENT,
             "search_filings",
-            args={"ticker": ticker, "sections": sections, "k": FILINGS_TOP_K},
+            args={"ticker": ticker, "sections": sections, "k": FILINGS_TOP_K, "collection": SEARCH_COLLECTION},
             provider="qdrant",
             latency_ms=elapsed,
             ok=bool(hits),

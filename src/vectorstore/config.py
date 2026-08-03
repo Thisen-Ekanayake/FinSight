@@ -28,6 +28,19 @@ FORBIDDEN_COLLECTIONS: frozenset[str] = frozenset({"athena_content", "image_embe
 COLLECTION_FILINGS: str = "finsight_filings"
 COLLECTION_ALERTS: str = "finsight_alerts"
 
+# Ablation twin of COLLECTION_FILINGS: identical filings, identical chunking,
+# identical payloads — embedded WITHOUT the contextual header.
+#
+# It has to be a separate collection rather than a flag on the same one. The
+# header changes the vector, not the payload, and a collection cannot hold two
+# vectors per point under one name. Comparing header on/off therefore means
+# comparing two indexes over the same corpus, which is also the only way to run
+# the A/B without destroying the production index.
+#
+# Not created by ensure_collections(); it exists only when the ablation is
+# being run. See evals/variants.py "no-headers".
+COLLECTION_FILINGS_ABLATION: str = "finsight_filings_noheader"
+
 VECTOR_SIZE: int = EMBEDDING_DIM
 DISTANCE: str = "Cosine"
 

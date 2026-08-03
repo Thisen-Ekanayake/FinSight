@@ -40,7 +40,7 @@ from src.data.schemas import FilingRef
 from src.vectorstore.chunking import FilingChunk, chunk_filing, contextual_header
 from src.vectorstore.client import get_qdrant_client
 from src.vectorstore.collections import ensure_collections
-from src.vectorstore.config import COLLECTION_FILINGS
+from src.vectorstore.config import COLLECTION_FILINGS, COLLECTION_FILINGS_ABLATION
 from src.vectorstore.embeddings import get_embedder
 
 logger = logging.getLogger(__name__)
@@ -118,6 +118,8 @@ def ingest_filing(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     skip_existing: bool = False,
+    collection: str = COLLECTION_FILINGS,
+    contextual: bool = True,
 ) -> IngestReport:
     """
     Chunk, embed, and upsert one filing.
@@ -132,6 +134,16 @@ def ingest_filing(
         Skip the filing entirely if any of its points are already present.
         Deterministic IDs make re-ingest harmless, so this is purely a time
         saver for large backfills.
+    collection : str, default COLLECTION_FILINGS
+        Target collection. Only the ablation twin should ever differ.
+    contextual : bool, default True
+        Prepend the contextual header before embedding. False builds the
+        ablation index — see COLLECTION_FILINGS_ABLATION.
+
+        These two travel together on purpose: writing header-less vectors into
+        the production collection would silently corrupt it, because the
+        payloads are byte-identical and the point IDs collide, so nothing would
+        look wrong until retrieval quality quietly dropped.
 
     Returns
     -------
@@ -140,6 +152,12 @@ def ingest_filing(
         A filing that fails to parse is skipped rather than raising — never
         ingest garbage.
     """
+    if not contextual and collection == COLLECTION_FILINGS:
+        raise ValueError(
+            "Refusing to write header-less vectors into the production collection: point IDs are "
+            f"deterministic, so they would overwrite the real vectors in place. Target {COLLECTION_FILINGS_ABLATION}."
+        )
+
     started = time.monotonic()
     client = get_qdrant_client()
 
@@ -155,7 +173,7 @@ def ingest_filing(
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
-    if skip_existing and _already_ingested(filing["accession_no"]):
+    if skip_existing and _already_ingested(filing["accession_no"], collection=collection):
         logger.info("%s %s: already ingested, skipping", filing["ticker"], filing["accession_no"])
         return report(0, 0, skipped=True, reason="already ingested")
 
@@ -179,10 +197,11 @@ def ingest_filing(
 
         # Contextual header applied HERE, at embed time only. The payload keeps
         # the raw text so citations quote the real document.
-        vectors = embedder.embed_documents([contextual_header(c) + c["text"] for c in batch])
+        prefix = contextual_header if contextual else (lambda _c: "")
+        vectors = embedder.embed_documents([prefix(c) + c["text"] for c in batch])
 
         client.upsert(
-            collection_name=COLLECTION_FILINGS,
+            collection_name=collection,
             points=[
                 PointStruct(
                     id=point_id(c["accession_no"], c["chunk_index"]),
@@ -206,13 +225,13 @@ def ingest_filing(
     return report(len(chunks), upserted)
 
 
-def _already_ingested(accession_no: str) -> bool:
+def _already_ingested(accession_no: str, *, collection: str = COLLECTION_FILINGS) -> bool:
     """True if any point for this accession number already exists."""
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     client = get_qdrant_client()
     points, _ = client.scroll(
-        collection_name=COLLECTION_FILINGS,
+        collection_name=collection,
         scroll_filter=Filter(must=[FieldCondition(key="accession_no", match=MatchValue(value=accession_no))]),
         limit=1,
         with_payload=False,
@@ -228,6 +247,8 @@ def ingest_ticker(
     limit: int = 4,
     since: date | None = None,
     skip_existing: bool = False,
+    collection: str = COLLECTION_FILINGS,
+    contextual: bool = True,
 ) -> list[IngestReport]:
     """
     Ingest a ticker's recent filings.
@@ -244,6 +265,10 @@ def ingest_ticker(
         Only filings on or after this date.
     skip_existing : bool, default False
         Skip filings already present in the collection.
+    collection : str, default COLLECTION_FILINGS
+        Target collection.
+    contextual : bool, default True
+        Prepend the contextual header before embedding.
 
     Returns
     -------
@@ -255,7 +280,9 @@ def ingest_ticker(
         logger.warning("%s: no matching filings found", ticker)
         return []
 
-    return [ingest_filing(f, skip_existing=skip_existing) for f in filings]
+    return [
+        ingest_filing(f, skip_existing=skip_existing, collection=collection, contextual=contextual) for f in filings
+    ]
 
 
 # ── CLI ─────────────────────────────────────────────────
@@ -271,9 +298,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=4, help="max filings per ticker")
     parser.add_argument("--since", help="only filings on/after this ISO date")
     parser.add_argument("--skip-existing", action="store_true", help="skip filings already ingested")
+    parser.add_argument(
+        "--no-headers",
+        action="store_true",
+        help=(
+            f"ablation: embed WITHOUT the contextual header into {COLLECTION_FILINGS_ABLATION}. "
+            "Implies --collection; the production index is never touched."
+        ),
+    )
     args = parser.parse_args(argv)
 
     configure_logging()
+
+    contextual = not args.no_headers
+    collection = COLLECTION_FILINGS if contextual else COLLECTION_FILINGS_ABLATION
 
     if args.watchlist:
         import os
@@ -285,6 +323,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("pass --ticker or --watchlist")
 
     ensure_collections()
+    if not contextual:
+        from src.vectorstore.collections import ensure_collection
+        from src.vectorstore.config import FILINGS_PAYLOAD_INDEXES
+
+        ensure_collection(collection, FILINGS_PAYLOAD_INDEXES)
+        print(f"\nABLATION: embedding without contextual headers into {collection}")
 
     all_reports: list[IngestReport] = []
     for ticker in tickers:
@@ -295,6 +339,8 @@ def main(argv: list[str] | None = None) -> int:
                 limit=args.limit,
                 since=date.fromisoformat(args.since) if args.since else None,
                 skip_existing=args.skip_existing,
+                collection=collection,
+                contextual=contextual,
             )
         )
 
@@ -309,8 +355,8 @@ def main(argv: list[str] | None = None) -> int:
 
     from src.vectorstore.collections import collection_stats
 
-    stats = collection_stats(COLLECTION_FILINGS)
-    print(f"{COLLECTION_FILINGS}: {stats['points']:,} points total")
+    stats = collection_stats(collection)
+    print(f"{collection}: {stats['points']:,} points total")
     return 0
 
 
