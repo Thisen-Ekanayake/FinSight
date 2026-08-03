@@ -21,7 +21,7 @@
 #   list_decisions(...)                   GET  /monitor/decisions
 #   get_watchlist(include_inactive)       GET  /watchlist
 #   add_ticker(ticker, company_name)      POST /watchlist
-#   remove_ticker(ticker)                 DELETE /watchlist/{ticker}
+#   remove_ticker(ticker)                 DELETE /watchlist/{ticker} -> True
 #   health()                              GET  /health
 #   budgets()                             GET  /admin/budgets
 #   config()                              GET  /admin/config
@@ -173,9 +173,17 @@ def add_ticker(ticker: str, *, company_name: str = "") -> dict[str, Any]:
     return result
 
 
-def remove_ticker(ticker: str) -> None:
-    """Stop watching a ticker (soft delete)."""
+def remove_ticker(ticker: str) -> bool:
+    """
+    Stop watching a ticker (soft delete). Returns True on success.
+
+    True rather than None: every other function in this module returns None
+    from safe_call() ONLY on failure, since a successful call always has a
+    body. DELETE has no body, and returning None here would make that
+    ordinary success indistinguishable from safe_call's failure sentinel.
+    """
     _request("DELETE", f"/watchlist/{ticker}")
+    return True
 
 
 # ── Admin ───────────────────────────────────────────────

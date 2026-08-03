@@ -67,9 +67,14 @@ class TestSuccess:
         _, kwargs = mock_req.call_args
         assert kwargs["params"] == {"limit": 50, "ticker": "AAPL"}
 
-    def test_a_delete_with_no_body_returns_none(self):
+    def test_a_delete_with_no_body_still_reports_success(self):
+        """
+        remove_ticker returns True, not None — safe_call's callers use None
+        as the failure sentinel, and a 204 has no body to make that
+        distinction some other way.
+        """
         with patch("requests.request", return_value=fake_response(status=204, json_body=None, text="")):
-            assert client.remove_ticker("AAPL") is None
+            assert client.remove_ticker("AAPL") is True
 
 
 class TestErrors:
