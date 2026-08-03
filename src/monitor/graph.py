@@ -8,9 +8,12 @@
 # Public API:
 #   monitor_fanout(state)       the conditional edge that spawns branches
 #   alert_synthesizer_node(state)
+#   human_approval_node(state)  interrupt() gate for HIGH alerts (Phase 7)
+#   dispatcher_node(state)      resolve approvals, deliver everything else
 #   persist_cycle_node(state)
 #   build_monitor_graph(checkpointer=None)
-#   run_cycle(...)              convenience wrapper
+#   run_cycle(...)              convenience wrapper — one cycle, start to finish or to a pause
+#   resume_cycle(...)           continue a paused cycle with a human's decisions
 #
 # ══ THE ASYMMETRIC FAN-OUT ══
 #   Subsystem 1 fans out over (agent x ticker), uniformly. This one does not,
@@ -26,15 +29,24 @@
 #   identical price requests and five identical CPI requests per cycle, and it
 #   would have looked perfectly reasonable in the code.
 #
-# ══ WHERE PHASE 7 LANDS ══
-#   `human_approval` (an interrupt() gate for HIGH alerts) and `dispatcher`
-#   insert between the synthesizer and persist_cycle. The state already carries
-#   pending_approval / approval_decisions / dispatched so that change is an
-#   edge rewiring rather than a state migration.
+# ══ PHASE 7: THE APPROVAL GATE IS DURABLE, NOT IN-PROCESS ══
+#   human_approval_node calls interrupt() only when there is a HIGH alert to
+#   decide — a pass-through otherwise, so a cycle with nothing HIGH never
+#   pauses. When it DOES pause, graph.invoke() returns immediately with a
+#   `__interrupt__` key in the result rather than blocking; the graph's state
+#   is durably checkpointed at that point, so the process can restart, and a
+#   LATER call to resume_cycle() with a human's decisions continues the SAME
+#   run from exactly where it paused. This is why run_cycle now REQUIRES a
+#   checkpointer rather than treating one as optional: without one, interrupt()
+#   still "works" in the sense of not raising, but the pause it produces
+#   cannot be resumed — a silent trap for a HIGH alert that quietly never
+#   reaches a reader. See src/persistence/checkpointer.py.
 #
 # Usage:
 #   ./run_monitor.sh --once --warmup
 #   ./run_monitor.sh --once
+#   ./run_monitor.sh --pending
+#   ./run_monitor.sh --approve <cycle_id> --alert <alert_id> [--alert <alert_id> ...]
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -186,6 +198,95 @@ def alert_synthesizer_node(state: MonitorState) -> dict:
     }
 
 
+def human_approval_node(state: MonitorState) -> dict:
+    """
+    Graph node: pause for a human decision on every HIGH-severity finding.
+
+    A pure pass-through when ``pending_approval`` is empty — interrupt() is
+    never called, so a cycle with only LOW/MED findings never pauses at all.
+    When it is not empty, the first execution raises GraphInterrupt and
+    graph.invoke() returns immediately with a ``__interrupt__`` key; nothing
+    past this point in the graph has run.
+
+    ══ RE-EXECUTION ON RESUME ══
+    LangGraph re-runs this node FROM THE TOP when Command(resume=...) is
+    sent — see langgraph.types.interrupt. Everything above the interrupt()
+    call is therefore recomputed, not reused. That is safe here because it is
+    pure: ``pending`` is read straight out of state, which alert_synthesizer
+    already wrote and this node never mutates.
+
+    Returns
+    -------
+    dict
+        ``approval_decisions``: ``{alert_id: "approve" | "reject"}``, empty
+        when there was nothing to decide.
+    """
+    from langgraph.types import interrupt
+
+    pending = state.get("pending_approval") or []
+    if not pending:
+        return {"approval_decisions": {}}
+
+    decisions = interrupt(
+        {
+            "cycle_id": state.get("cycle_id", ""),
+            "pending_approval": [dict(alert) for alert in pending],
+        }
+    )
+    return {"approval_decisions": dict(decisions or {})}
+
+
+def dispatcher_node(state: MonitorState) -> dict:
+    """
+    Graph node: resolve every approval decision, then deliver whatever fired.
+
+    ══ WHERE PENDING_APPROVAL BECOMES FIRED OR REJECTED ══
+    A LOW/MED alert already carries status FIRED — dedup.py set it at index
+    time, and it is delivered unconditionally. A HIGH alert carries
+    PENDING_APPROVAL, and approval_decisions says what was decided: this is
+    where that decision is written back to the alert (for persist_cycle_node,
+    downstream) and to its Qdrant point (via update_status, here — the SQLite
+    row does not exist yet, so there is nothing there to update until persist
+    runs). An alert with no entry in approval_decisions is treated as
+    rejected rather than fired: the asymmetric-cost stance the rest of this
+    engine takes is about missing a report, not about withholding one nobody
+    explicitly approved.
+
+    Returns
+    -------
+    dict
+        ``fired``, ``merged`` with resolved statuses, and ``dispatched`` —
+        the alert ids that at least one notification sink actually delivered.
+    """
+    from src.monitor.alert_store import update_status
+    from src.monitor.config import REJECTED_STATUS
+    from src.monitor.dispatch import dispatch_alert
+
+    decisions = state.get("approval_decisions") or {}
+    pending_ids = {alert["alert_id"] for alert in state.get("pending_approval") or []}
+
+    def resolve(alert: Alert) -> Alert:
+        if alert["alert_id"] not in pending_ids:
+            return alert
+        status = "FIRED" if decisions.get(alert["alert_id"]) == "approve" else REJECTED_STATUS
+        update_status(alert["alert_id"], status)
+        resolved: Alert = {**alert, "status": status}  # type: ignore[typeddict-item]
+        return resolved
+
+    fired = [resolve(alert) for alert in state.get("fired") or []]
+    merged = [resolve(alert) for alert in state.get("merged") or []]
+
+    dispatched = [
+        alert["alert_id"] for alert in [*fired, *merged] if alert["status"] == "FIRED" and dispatch_alert(alert)
+    ]
+
+    if pending_ids:
+        approved = sum(1 for i in pending_ids if decisions.get(i) == "approve")
+        logger.info("Approvals resolved: %d/%d approved, %d dispatched", approved, len(pending_ids), len(dispatched))
+
+    return {"fired": fired, "merged": merged, "dispatched": dispatched}
+
+
 def _should_log_distribution() -> bool:
     """
     True for the first few cycles ever run.
@@ -261,18 +362,32 @@ def build_monitor_graph(checkpointer: Any = None) -> Any:
                                                             alert_synthesizer
                                                                        |
                                                                        v
+                                                            human_approval  (interrupt() iff a HIGH is pending)
+                                                                       |
+                                                                       v
+                                                                  dispatcher
+                                                                       |
+                                                                       v
                                                         persist_cycle -> END
 
     Unlike the research graph this one is acyclic: there is no repair loop,
     because there is no answer to repair. The cycle either observed something
     or it did not.
 
+    ``human_approval`` and ``dispatcher`` sit unconditionally between the
+    synthesizer and persist_cycle — no conditional edge is needed because
+    human_approval_node is itself a pass-through when there is nothing HIGH.
+
     Parameters
     ----------
     checkpointer : optional
         With one, ``thread_id = f"monitor:{cycle_id}"`` makes each cycle an
-        independently resumable thread — which is what Phase 7's interrupt gate
-        needs to pause for hours and resume after a process restart.
+        independently resumable thread. REQUIRED in practice: without one,
+        ``interrupt()`` in human_approval_node still returns rather than
+        raising, but the pause it produces cannot be resumed by a later
+        process — see the module docstring. run_cycle() enforces this; a
+        caller building the graph directly (as most tests do, with no HIGH
+        candidates in play) is not stopped from omitting it.
 
     Returns
     -------
@@ -286,6 +401,8 @@ def build_monitor_graph(checkpointer: Any = None) -> Any:
     for name in MONITOR_NAMES:
         graph.add_node(name, MONITOR_NODES[name])
     graph.add_node("alert_synthesizer", alert_synthesizer_node)
+    graph.add_node("human_approval", human_approval_node)
+    graph.add_node("dispatcher", dispatcher_node)
     graph.add_node("persist_cycle", persist_cycle_node)
 
     graph.add_edge(START, "load_watchlist")
@@ -293,10 +410,17 @@ def build_monitor_graph(checkpointer: Any = None) -> Any:
 
     for name in MONITOR_NAMES:
         graph.add_edge(name, "alert_synthesizer")
-    graph.add_edge("alert_synthesizer", "persist_cycle")
+    graph.add_edge("alert_synthesizer", "human_approval")
+    graph.add_edge("human_approval", "dispatcher")
+    graph.add_edge("dispatcher", "persist_cycle")
     graph.add_edge("persist_cycle", END)
 
     return graph.compile(checkpointer=checkpointer)
+
+
+def thread_id_for(cycle_id: str) -> str:
+    """The checkpointer thread id a cycle's state lives under."""
+    return f"monitor:{cycle_id}"
 
 
 def run_cycle(
@@ -306,7 +430,7 @@ def run_cycle(
     checkpointer: Any = None,
 ) -> MonitorState:
     """
-    Run one monitoring cycle end to end.
+    Run one monitoring cycle — to completion, or to a pause for approval.
 
     Parameters
     ----------
@@ -316,17 +440,29 @@ def run_cycle(
     warmup : bool, default False
         Observe-only: index candidates for future dedup, report nothing.
     checkpointer : optional
-        LangGraph checkpointer.
+        LangGraph checkpointer. Without one, a cycle that raises a HIGH alert
+        still returns a state that LOOKS paused (``__interrupt__`` is set),
+        but nothing durable was written for it to resume FROM — a later
+        resume_cycle() call would find no state and fail. A warning is logged
+        rather than an exception raised, because a cycle with nothing HIGH in
+        it runs correctly either way and most cycles are exactly that.
 
     Returns
     -------
     MonitorState
-        Final state, including ``fired``, ``suppressed``, ``merged``, and the
-        ``decisions`` audit trail.
+        The final state if the cycle completed, or the paused state (with a
+        ``__interrupt__`` key and populated ``pending_approval``) if it did
+        not. Check with ``"__interrupt__" in result``.
     """
     from src.monitor.state import WatchedTicker
     from src.monitor.watchlist import current_watchlist, ensure_seeded
     from src.persistence.repository import record_cycle
+
+    if checkpointer is None:
+        logger.warning(
+            "run_cycle() called with no checkpointer — a HIGH alert this cycle would pause "
+            "unrecoverably. See src/persistence/checkpointer.py."
+        )
 
     ensure_seeded()
 
@@ -338,13 +474,93 @@ def run_cycle(
     state = new_cycle_state(watchlist, warmup=warmup)
     graph = build_monitor_graph(checkpointer=checkpointer)
 
-    config: dict[str, Any] = {"configurable": {"thread_id": f"monitor:{state['cycle_id']}"}}
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id_for(state["cycle_id"])}}
 
     started = time.monotonic()
     result: MonitorState = graph.invoke(state, config=config)
     elapsed = int((time.monotonic() - started) * 1000)
 
-    record_cycle(dict(result), duration_ms=elapsed)
+    if "__interrupt__" in result:
+        logger.info(
+            "Cycle %s paused for approval — %d alert(s) pending",
+            state["cycle_id"],
+            len(result.get("pending_approval") or []),
+        )
+        record_cycle(dict(result), duration_ms=elapsed, status="PENDING_APPROVAL")
+    else:
+        record_cycle(dict(result), duration_ms=elapsed, status="COMPLETE")
+
+    return result
+
+
+def resume_cycle(
+    cycle_id: str,
+    decisions: dict[str, str],
+    *,
+    checkpointer: Any,
+) -> MonitorState:
+    """
+    Continue a cycle that paused for approval, with a human's decisions.
+
+    Parameters
+    ----------
+    cycle_id : str
+        The paused cycle's id — from run_cycle's result, or
+        ``GET /monitor/cycles?status=PENDING_APPROVAL``.
+    decisions : dict
+        ``{alert_id: "approve" | "reject"}``. Must cover EXACTLY the alert
+        ids the cycle is actually waiting on — not a subset, not extras. A
+        partial decisions dict would leave some alerts silently defaulted by
+        dispatcher_node rather than actually decided, and an alert id that
+        does not belong to this cycle is very likely a copy-paste mistake
+        from a different one, which is worth a loud failure rather than a
+        quiet no-op.
+    checkpointer : LangGraph checkpointer
+        MUST be connected to the same database run_cycle used — the paused
+        state lives there, not in this process's memory. There is no
+        default: silently opening a fresh one that happens to point at the
+        same file is exactly the kind of implicit dependency that makes it
+        surprising when it stops working after a config change.
+
+    Returns
+    -------
+    MonitorState
+        The completed state.
+
+    Raises
+    ------
+    ValueError
+        If the cycle is not currently paused, or ``decisions`` does not
+        exactly match the pending alert ids.
+    """
+    from src.persistence.repository import record_cycle
+
+    graph = build_monitor_graph(checkpointer=checkpointer)
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id_for(cycle_id)}}
+
+    snapshot = graph.get_state(config)
+    if not snapshot.next:
+        raise ValueError(f"Cycle {cycle_id} is not paused — nothing to resume")
+
+    pending_ids = {
+        alert["alert_id"]
+        for task in snapshot.tasks
+        for interrupt in task.interrupts
+        for alert in (interrupt.value or {}).get("pending_approval", [])
+    }
+    if set(decisions) != pending_ids:
+        raise ValueError(
+            f"decisions must cover exactly the pending alerts {sorted(pending_ids)}, got {sorted(decisions)}"
+        )
+
+    from langgraph.types import Command
+
+    started = time.monotonic()
+    result: MonitorState = graph.invoke(Command(resume=decisions), config=config)
+    elapsed = int((time.monotonic() - started) * 1000)
+
+    record_cycle(dict(result), duration_ms=elapsed, status="COMPLETE")
+    logger.info("Cycle %s resumed and completed (%d fired)", cycle_id, len(result.get("fired") or []))
     return result
 
 
@@ -355,7 +571,31 @@ def cycle_report(state: MonitorState) -> str:
     Suppressions are printed WITH their score and matched parent. Most projects
     hide their cleverest logic; a dedup engine whose decisions are invisible is
     indistinguishable from one that is dropping alerts through a bug.
+
+    A PAUSED cycle (``"__interrupt__" in state``) gets a distinct report: the
+    graph stopped before dispatcher_node ran, so nothing — not even a LOW/MED
+    finding — has actually been delivered yet, and rendering the ordinary
+    "fired" section would claim otherwise.
     """
+    cycle_id = state.get("cycle_id", "?")
+
+    if "__interrupt__" in state:
+        pending = state.get("pending_approval") or []
+        lines = [
+            "",
+            f"  Cycle {cycle_id}  (PAUSED — awaiting approval, nothing dispatched yet)",
+            f"  {len(pending)} HIGH alert(s) pending:",
+            "",
+        ]
+        for alert in pending:
+            lines.append(f"  ?? {alert['ticker'] or 'MACRO':<6} {alert['headline']}")
+            lines.append(f"        {alert['detail'][:110]}")
+            lines.append(f"        alert_id: {alert['alert_id']}")
+        lines.append("")
+        lines.append(f"  Resolve with: ./run_monitor.sh --approve {cycle_id} --alert <id>  (repeatable, or --reject)")
+        lines.append("")
+        return "\n".join(lines)
+
     fired = state.get("fired") or []
     merged = state.get("merged") or []
     suppressed = state.get("suppressed") or []
@@ -364,17 +604,20 @@ def cycle_report(state: MonitorState) -> str:
 
     exact = [s for s in suppressed if s["score"] >= 1.0]
     semantic = [s for s in suppressed if s["score"] < 1.0]
+    rejected = [a for a in [*fired, *merged] if a.get("status") == "REJECTED"]
+    delivered = [a for a in [*fired, *merged] if a.get("status", "FIRED") != "REJECTED"]
 
     lines = [
         "",
-        f"  Cycle {state.get('cycle_id', '?')}{'  (WARMUP — nothing dispatched)' if state.get('warmup') else ''}",
-        f"  {len(candidates)} candidates -> {len(fired)} fired, {len(suppressed)} suppressed"
+        f"  Cycle {cycle_id}{'  (WARMUP — nothing dispatched)' if state.get('warmup') else ''}",
+        f"  {len(candidates)} candidates -> {len(delivered)} fired, {len(suppressed)} suppressed"
         f"{f' ({len(exact)} exact-key, {len(semantic)} semantic)' if suppressed else ''}"
-        f"{f', {len(merged)} escalated' if merged else ''}",
+        f"{f', {len(merged)} escalated' if merged else ''}"
+        f"{f', {len(rejected)} rejected' if rejected else ''}",
         "",
     ]
 
-    for alert in [*fired, *merged]:
+    for alert in delivered:
         marker = "!!" if alert["severity"] == "HIGH" else "  "
         lines.append(f"  {marker} [{alert['severity']:<4}] {alert['ticker'] or 'MACRO':<6} {alert['headline']}")
         lines.append(f"        {alert['detail'][:110]}")

@@ -320,7 +320,14 @@ class TestGraphTopology:
         graph = build_monitor_graph()
         nodes = set(graph.get_graph().nodes)
 
-        for expected in ("load_watchlist", "alert_synthesizer", "persist_cycle", *MONITOR_NAMES):
+        for expected in (
+            "load_watchlist",
+            "alert_synthesizer",
+            "human_approval",
+            "dispatcher",
+            "persist_cycle",
+            *MONITOR_NAMES,
+        ):
             assert expected in nodes
 
     def test_the_graph_is_acyclic(self):
@@ -332,6 +339,251 @@ class TestGraphTopology:
 
         edges = build_monitor_graph().get_graph().edges
         assert not any(edge.source == "alert_synthesizer" and edge.target == "load_watchlist" for edge in edges)
+
+    def test_human_approval_sits_between_synthesizer_and_dispatcher(self):
+        from src.monitor.graph import build_monitor_graph
+
+        edges = {(edge.source, edge.target) for edge in build_monitor_graph().get_graph().edges}
+        assert ("alert_synthesizer", "human_approval") in edges
+        assert ("human_approval", "dispatcher") in edges
+        assert ("dispatcher", "persist_cycle") in edges
+
+
+def _alert(**overrides):
+    base = {
+        "alert_id": "a1",
+        "ticker": "AAPL",
+        "company_name": "Apple Inc.",
+        "alert_type": "NEW_FILING",
+        "severity": "HIGH",
+        "status": "PENDING_APPROVAL",
+        "headline": "Apple filed an 8-K",
+        "detail": "non-reliance on previously issued financials",
+        "canonical_text": "c",
+        "dedup_key": "k",
+        "metrics": {},
+        "evidence": [],
+        "occurrence_count": 1,
+        "first_seen_at": "2026-08-03T00:00:00+00:00",
+        "last_seen_at": "2026-08-03T00:00:00+00:00",
+        "fired_at": "2026-08-03T00:00:00+00:00",
+        "parent_alert_id": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def _approval_subgraph(checkpointer):
+    """
+    human_approval -> dispatcher, in isolation from load_watchlist and the
+    four monitors — which would otherwise need mocking out real network calls
+    just to exercise interrupt/resume mechanics that have nothing to do with
+    how a candidate was discovered.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    from src.monitor.graph import dispatcher_node, human_approval_node
+
+    graph = StateGraph(MonitorState)
+    graph.add_node("human_approval", human_approval_node)
+    graph.add_node("dispatcher", dispatcher_node)
+    graph.add_edge(START, "human_approval")
+    graph.add_edge("human_approval", "dispatcher")
+    graph.add_edge("dispatcher", END)
+    return graph.compile(checkpointer=checkpointer)
+
+
+class TestApprovalGate:
+    def test_no_pending_alerts_never_pauses(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        graph = _approval_subgraph(InMemorySaver())
+        state = new_cycle_state(watchlist("AAPL"))
+        state["fired"] = []
+        state["pending_approval"] = []
+
+        with patch("src.monitor.dispatch.dispatch_alert", return_value=True):
+            result = graph.invoke(state, {"configurable": {"thread_id": "t-none"}})
+
+        assert "__interrupt__" not in result
+
+    def test_a_high_alert_pauses_the_graph(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        graph = _approval_subgraph(InMemorySaver())
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"))
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+
+        result = graph.invoke(state, {"configurable": {"thread_id": "t-pause"}})
+
+        assert "__interrupt__" in result
+        payload = result["__interrupt__"][0].value
+        assert payload["pending_approval"][0]["alert_id"] == "a1"
+
+    def test_approving_flips_status_to_fired_and_dispatches(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Command
+
+        saver = InMemorySaver()
+        graph = _approval_subgraph(saver)
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"))
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+        config = {"configurable": {"thread_id": "t-approve"}}
+        graph.invoke(state, config)
+
+        with (
+            patch("src.monitor.alert_store.update_status", return_value=True) as mock_update,
+            patch("src.monitor.dispatch.dispatch_alert", return_value=True) as mock_dispatch,
+        ):
+            result = graph.invoke(Command(resume={"a1": "approve"}), config)
+
+        assert result["fired"][0]["status"] == "FIRED"
+        assert result["dispatched"] == ["a1"]
+        mock_update.assert_called_once_with("a1", "FIRED")
+        mock_dispatch.assert_called_once()
+
+    def test_rejecting_does_not_dispatch(self):
+        from langgraph.checkpoint.memory import InMemorySaver
+        from langgraph.types import Command
+
+        saver = InMemorySaver()
+        graph = _approval_subgraph(saver)
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"))
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+        config = {"configurable": {"thread_id": "t-reject"}}
+        graph.invoke(state, config)
+
+        with (
+            patch("src.monitor.alert_store.update_status", return_value=True) as mock_update,
+            patch("src.monitor.dispatch.dispatch_alert") as mock_dispatch,
+        ):
+            result = graph.invoke(Command(resume={"a1": "reject"}), config)
+
+        assert result["fired"][0]["status"] == "REJECTED"
+        assert result["dispatched"] == []
+        mock_update.assert_called_once_with("a1", "REJECTED")
+        mock_dispatch.assert_not_called()
+
+    def test_a_low_severity_alert_never_enters_pending_approval_and_dispatches_immediately(self):
+        """LOW/MED alerts are not gated at all — they were already status FIRED at index time."""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        graph = _approval_subgraph(InMemorySaver())
+        alert = _alert(alert_id="a2", severity="LOW", status="FIRED")
+        state = new_cycle_state(watchlist("AAPL"))
+        state["fired"] = [alert]
+        state["pending_approval"] = []
+
+        with patch("src.monitor.dispatch.dispatch_alert", return_value=True):
+            result = graph.invoke(state, {"configurable": {"thread_id": "t-low"}})
+
+        assert "__interrupt__" not in result
+        assert result["dispatched"] == ["a2"]
+
+
+class TestResumeCycle:
+    def test_resuming_a_cycle_that_is_not_paused_raises(self, temp_db):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import resume_cycle
+
+        saver = InMemorySaver()
+        with patch("src.monitor.graph.build_monitor_graph", return_value=_approval_subgraph(saver)):
+            with pytest.raises(ValueError, match="not paused"):
+                resume_cycle("never-ran", {}, checkpointer=saver)
+
+    def test_a_decisions_mismatch_raises(self, temp_db):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import resume_cycle
+
+        saver = InMemorySaver()
+        subgraph = _approval_subgraph(saver)
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"), cycle_id="c1")
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+        subgraph.invoke(state, {"configurable": {"thread_id": "monitor:c1"}})
+
+        with patch("src.monitor.graph.build_monitor_graph", return_value=subgraph):
+            with pytest.raises(ValueError, match="pending alerts"):
+                resume_cycle("c1", {"some-other-id": "approve"}, checkpointer=saver)
+
+    def test_resuming_with_the_right_decisions_completes_and_records(self, temp_db):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.monitor.graph import resume_cycle
+        from src.persistence.repository import get_cycle
+
+        saver = InMemorySaver()
+        subgraph = _approval_subgraph(saver)
+        alert = _alert(alert_id="a1")
+        state = new_cycle_state(watchlist("AAPL"), cycle_id="c1")
+        state["fired"] = [alert]
+        state["pending_approval"] = [alert]
+        subgraph.invoke(state, {"configurable": {"thread_id": "monitor:c1"}})
+
+        with (
+            patch("src.monitor.graph.build_monitor_graph", return_value=subgraph),
+            patch("src.monitor.alert_store.update_status", return_value=True),
+            patch("src.monitor.dispatch.dispatch_alert", return_value=True),
+        ):
+            result = resume_cycle("c1", {"a1": "approve"}, checkpointer=saver)
+
+        assert result["fired"][0]["status"] == "FIRED"
+        assert get_cycle("c1")["status"] == "COMPLETE"
+
+
+class TestRunCyclePause:
+    def test_a_paused_result_is_recorded_pending_approval(self, temp_db):
+        from unittest.mock import MagicMock
+
+        from src.monitor.graph import run_cycle
+        from src.persistence.repository import get_cycle
+
+        fake_graph = MagicMock()
+        fake_graph.invoke.return_value = {
+            "cycle_id": "c-paused",
+            "watchlist": [],
+            "fired": [],
+            "pending_approval": [{"alert_id": "a1"}],
+            "__interrupt__": [MagicMock()],
+        }
+
+        with (
+            patch("src.monitor.graph.build_monitor_graph", return_value=fake_graph),
+            patch("src.monitor.watchlist.current_watchlist", return_value=[]),
+            patch("src.monitor.watchlist.ensure_seeded"),
+        ):
+            result = run_cycle(checkpointer=object())
+
+        assert "__interrupt__" in result
+        assert get_cycle("c-paused")["status"] == "PENDING_APPROVAL"
+
+    def test_a_completed_result_is_recorded_complete(self, temp_db):
+        from unittest.mock import MagicMock
+
+        from src.monitor.graph import run_cycle
+        from src.persistence.repository import get_cycle
+
+        fake_graph = MagicMock()
+        fake_graph.invoke.return_value = {"cycle_id": "c-done", "watchlist": [], "fired": []}
+
+        with (
+            patch("src.monitor.graph.build_monitor_graph", return_value=fake_graph),
+            patch("src.monitor.watchlist.current_watchlist", return_value=[]),
+            patch("src.monitor.watchlist.ensure_seeded"),
+        ):
+            result = run_cycle(checkpointer=object())
+
+        assert "__interrupt__" not in result
+        assert get_cycle("c-done")["status"] == "COMPLETE"
 
 
 class TestCycleReport:
