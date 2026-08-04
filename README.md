@@ -2,9 +2,9 @@
 
 **Multi-agent financial intelligence platform** — grounded research on demand, plus autonomous portfolio surveillance.
 
-Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), and **Google Gemini** (reasoning). All financial data comes from free, official sources.
+Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), **Google Gemini** (reasoning), and **Streamlit** (dashboard) — containerized with Docker. All financial data comes from free, official sources.
 
-> Status: **Phase 7 complete** — both subsystems are live. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, **deduplicates** it semantically, and now gates every HIGH-severity finding behind a **durable human-approval interrupt** before dispatching it to console, file, or email. See [the phase plan](#phases).
+> Status: **Phase 8 complete** — both subsystems are live behind a Streamlit dashboard. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, **deduplicates** it semantically, and gates every HIGH-severity finding behind a **durable human-approval interrupt** before dispatching it to console, file, or email. The whole stack — Qdrant, API, dashboard — is one `docker compose up --build`. See [the phase plan](#phases).
 
 ## Measured, not asserted
 
@@ -186,6 +186,24 @@ make test                     # unit tests (no network, no LLM spend)
 ./run_api.sh                                            # then open localhost:8000/docs
 ```
 
+### Look at it
+
+```bash
+./run_api.sh          # backend first
+./run_ui.sh            # then localhost:8501
+```
+
+Six pages over the API — nothing here has its own database connection or graph
+import, it is exactly the HTTP surface above. **Approvals** is the one worth
+opening first: every cycle paused on a HIGH-severity finding, its actual
+alerts, and a decision radio defaulted to Reject — submitting without
+touching anything rejects everything, the same "no explicit approval = not
+dispatched" rule `dispatcher_node` enforces server-side.
+
+`docker compose up --build` runs the whole stack — Qdrant, API, dashboard —
+in one command; see [`docs/deploy.md`](docs/deploy.md) for putting that on a
+host with a public URL.
+
 ### Watch something
 
 ```bash
@@ -274,7 +292,7 @@ This machine already runs a Qdrant on **:6333** owned by another project. FinSig
 | 5 | ✅ Eval suite A: 40 golden questions, 7 evaluators, measured iteration | **LangSmith evals** |
 | 6 | ✅ Monitoring subsystem + the dedup engine | **LangGraph + Qdrant as a data structure** |
 | 7 | ✅ HITL `interrupt` gate, dispatcher, scheduler, eval suite B | **Durable execution** |
-| 8 | Streamlit dashboard, Docker, public deploy | Consolidation |
+| 8 | ✅ Streamlit dashboard, Docker, public deploy guide | **Consolidation** |
 | 9 | *(stretch)* Hybrid search — sparse + RRF fusion | Advanced Qdrant |
 
 **Phase gate rule:** do not start phase N+1 until phase N is demoable, tested, and committed.
