@@ -50,6 +50,28 @@ services:
         condition: service_healthy
     volumes:
       - finsight-data:/app/data
+      # Vertex auth. The image runs as uid 1000 "finsight", so HOME inside the
+      # container is /home/finsight and google-auth looks for ADC there — never
+      # in the host user's ~/.config/gcloud. Mount the one file it needs.
+      # Read-only is safe: google-auth refreshes the access token in memory and
+      # only gcloud itself ever rewrites this file.
+      #
+      # create_host_path: false is deliberate. Under Docker's default, a missing
+      # source would be "helpfully" created on the HOST as an empty directory,
+      # which permanently breaks `gcloud auth application-default login`. Better
+      # to refuse to start. On GEMINI_BACKEND=aistudio, delete this mount —
+      # that path authenticates with GOOGLE_API_KEY and needs no ADC.
+      #
+      # Servers have no interactive gcloud login: set GOOGLE_CREDENTIALS_FILE to
+      # a service-account key path instead (docs/deploy.md §2). The target stays
+      # the ADC well-known path either way — google-auth loads both the
+      # "authorized_user" and "service_account" JSON shapes from it.
+      - type: bind
+        source: ${GOOGLE_CREDENTIALS_FILE:-${HOME}/.config/gcloud/application_default_credentials.json}
+        target: /home/finsight/.config/gcloud/application_default_credentials.json
+        read_only: true
+        bind:
+          create_host_path: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
