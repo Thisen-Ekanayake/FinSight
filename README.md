@@ -1,5 +1,7 @@
 # FinSight
 
+[![CI](https://github.com/Thisen-Ekanayake/FinSight/actions/workflows/ci.yml/badge.svg)](https://github.com/Thisen-Ekanayake/FinSight/actions/workflows/ci.yml)
+
 **Multi-agent financial intelligence platform** — grounded research on demand, plus autonomous portfolio surveillance.
 
 Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), **Google Gemini** (reasoning), and **React + three.js** (dashboard) — containerized with Docker. All financial data comes from free, official sources.
@@ -287,6 +289,44 @@ STEP  NODES THAT RAN                                    FINDINGS
 ```
 
 That trail is read back from the checkpointer, not written by a logger alongside the run.
+
+### Check it
+
+```bash
+make lint          # flake8 + black --check + isort --check
+make type-check    # mypy on src/
+make test          # 872 unit tests, no network, no quota
+```
+
+Those three are the first CI job, run through the same Makefile targets so
+there is one definition of "clean" rather than two that drift. The second job
+type-checks and builds the frontend bundle. The third is the one worth having:
+it brings the **real** `docker-compose.yml` up on a runner and points
+[`scripts/api_smoke.py`](./scripts/api_smoke.py) at it, so every endpoint the
+dashboard calls is checked against a running backend, and nginx is checked
+against a backend it can only reach by compose network name. That is the class
+of failure — a container that starts but cannot serve, a proxy that resolves
+nowhere — that 872 passing unit tests say nothing about.
+
+A CI overlay, [`docker-compose.ci.yml`](./docker-compose.ci.yml), changes only
+what a runner cannot satisfy: it switches the LLM backend to `aistudio` so no
+Google credential file has to exist, and renames the project, containers, and
+network so the stack is isolated even when started beside a running dev stack.
+
+**The pipeline never runs `make evals`.** One suite run is ~320 LLM calls of
+real Vertex spend; which experiment to pay for is a decision recorded in
+[`docs/eval_results.md`](./docs/eval_results.md), not a consequence of pushing.
+
+Tagging a release publishes two images to GHCR — `finsight-api` and
+`finsight-web` — after the whole CI file has passed:
+
+```bash
+git tag -a v0.9.0 -m "Phase 8" && git push origin v0.9.0
+```
+
+It publishes; it does not deploy. Nothing in this repo reaches a server —
+[`docs/deploy.md`](./docs/deploy.md) is a guide you follow on a host you
+control, and deploying stays a deliberate `docker compose pull && up -d` there.
 
 ### Gemini backends
 
