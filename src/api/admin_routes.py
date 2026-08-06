@@ -16,7 +16,9 @@
 #   the response model lists every field explicitly and holds only names,
 #   URLs, and numbers. It is built by naming fields, never by iterating over
 #   the config module — an iteration would pick up GOOGLE_API_KEY the moment
-#   somebody added one.
+#   somebody added one. NOTIFICATION_SINKS is a list of sink NAMES
+#   ("console", "file", "email"); the SMTP credentials behind the email sink
+#   live in src/monitor/config.py and are not reachable from here.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -29,9 +31,11 @@ from sqlalchemy import text
 from src.api.schemas import BudgetOut, ConfigOut, HealthResponse
 from src.core import config as core_config
 from src.core.tracing import is_tracing_enabled
+from src.monitor.config import MONITOR_CADENCE_HOURS, NOTIFICATION_SINKS
 from src.persistence.db import get_engine
 from src.persistence.repository import get_budget_status
 from src.research.config import MAX_REPAIR_ATTEMPTS, NUMERIC_REL_TOLERANCE, VERIFY_QUALITATIVE_CLAIMS
+from src.vectorstore.config import TAU_HIGH, TAU_LOW
 
 logger = logging.getLogger(__name__)
 
@@ -114,4 +118,8 @@ async def effective_config() -> ConfigOut:
         numeric_tolerance=NUMERIC_REL_TOLERANCE,
         max_repair_attempts=MAX_REPAIR_ATTEMPTS,
         verify_qualitative_claims=VERIFY_QUALITATIVE_CLAIMS,
+        dedup_tau_high=TAU_HIGH,
+        dedup_tau_low=TAU_LOW,
+        monitor_cadence_hours=MONITOR_CADENCE_HOURS,
+        notification_sinks=list(NOTIFICATION_SINKS),
     )

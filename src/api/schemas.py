@@ -214,6 +214,19 @@ class ConfigOut(BaseModel):
     max_repair_attempts: int
     verify_qualitative_claims: bool
 
+    # ══ WHY THE MONITORING NUMBERS ARE PUBLISHED ══
+    #   The dashboard explains its own dedup decisions in prose — "folded
+    #   above 0.89, between 0.78 and 0.89 it is merged as the same event
+    #   rather than dropped". Hardcoding those two numbers in the frontend
+    #   would make the explanation silently wrong the first time anyone
+    #   re-tuned them, and they must be re-tuned from scratch whenever
+    #   EMBEDDING_MODEL changes (src/vectorstore/config.py). Reading them
+    #   from here is the only way that sentence stays true.
+    dedup_tau_high: float
+    dedup_tau_low: float
+    monitor_cadence_hours: int
+    notification_sinks: list[str]
+
 
 # ── Monitoring (Phase 6) ────────────────────────────────
 class WatchItemOut(BaseModel):
