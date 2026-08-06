@@ -1,0 +1,44 @@
+{"id": "aapl-news-1", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "doj-app-store-probe", "text": "regulatory antitrust investigation into app store practices"}
+{"id": "aapl-news-2", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "doj-app-store-probe", "text": "justice department inquiry into app store competition rules"}
+{"id": "aapl-news-3", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "doj-app-store-probe", "text": "federal scrutiny of app store commission structure and developer terms"}
+{"id": "aapl-news-4", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "macbook-adapter-recall", "text": "product recall of power adapters over a fire safety defect"}
+{"id": "aapl-news-5", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "macbook-adapter-recall", "text": "manufacturer recall covering charging accessories after overheating reports"}
+{"id": "aapl-news-6", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "disclosure-shareholder-suit", "text": "shareholder lawsuit alleging misleading disclosures to investors"}
+{"id": "aapl-news-7", "ticker": "AAPL", "alert_type": "NEWS_SENTIMENT", "cluster": "disclosure-shareholder-suit", "text": "investor class action over delayed disclosure of a known risk"}
+{"id": "aapl-filing-1", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "8k-nonreliance", "text": "auditor notified the company that previously issued financials should not be relied upon"}
+{"id": "aapl-filing-2", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "8k-nonreliance", "text": "8-k disclosing non-reliance on prior period financial statements"}
+{"id": "aapl-filing-3", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "8k-nonreliance", "text": "restatement required after auditor flagged errors in earlier filings"}
+{"id": "aapl-filing-4", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "8k-cfo-departure", "text": "8-k reporting departure of the principal financial officer"}
+{"id": "aapl-filing-5", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "8k-cfo-departure", "text": "chief financial officer resignation disclosed in a current report"}
+{"id": "aapl-filing-6", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "10k-periodic", "text": "annual report filed covering the full fiscal year results"}
+{"id": "aapl-filing-7", "ticker": "AAPL", "alert_type": "NEW_FILING", "cluster": "10k-periodic", "text": "10-k filing disclosing yearly operating and financial results"}
+{"id": "nvda-price-1", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "earnings-beat-rally", "text": "sharp single-day rally following better than expected quarterly results"}
+{"id": "nvda-price-2", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "earnings-beat-rally", "text": "shares surged after quarterly earnings topped analyst expectations"}
+{"id": "nvda-price-3", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "earnings-beat-rally", "text": "stock jumped on strong data center demand reported in earnings"}
+{"id": "nvda-price-4", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "export-curb-selloff", "text": "sharp single-day decline after new export restrictions were announced"}
+{"id": "nvda-price-5", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "export-curb-selloff", "text": "shares fell on news of tightened chip export controls"}
+{"id": "nvda-price-6", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "export-curb-selloff", "text": "stock dropped after government restricted sales to a key market"}
+{"id": "nvda-price-7", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "guidance-cut-decline", "text": "shares declined after management lowered forward guidance"}
+{"id": "nvda-price-8", "ticker": "NVDA", "alert_type": "PRICE_MOVE", "cluster": "guidance-cut-decline", "text": "stock fell following a cut to next quarter's revenue outlook"}
+{"id": "msft-filing-1", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "8k-subsidiary-bankruptcy", "text": "8-k disclosing bankruptcy filing of a material subsidiary"}
+{"id": "msft-filing-2", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "8k-subsidiary-bankruptcy", "text": "current report covering a subsidiary's receivership proceeding"}
+{"id": "msft-filing-3", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "8k-other-events", "text": "8-k reporting other material events affecting the business"}
+{"id": "msft-filing-4", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "8k-other-events", "text": "current report disclosing an unscheduled corporate development"}
+{"id": "msft-filing-5", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "8k-other-events", "text": "8-k filed to disclose a material agreement amendment"}
+{"id": "msft-filing-6", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "10q-periodic", "text": "quarterly report filed covering the most recent fiscal quarter"}
+{"id": "msft-filing-7", "ticker": "MSFT", "alert_type": "NEW_FILING", "cluster": "10q-periodic", "text": "10-q filing disclosing quarterly operating and financial results"}
+{"id": "macro-1", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "fed-funds-hike", "text": "federal funds rate raised at the scheduled policy meeting"}
+{"id": "macro-2", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "fed-funds-hike", "text": "central bank tightened policy by lifting the benchmark rate"}
+{"id": "macro-3", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "fed-funds-hike", "text": "policy rate increased following the committee's scheduled meeting"}
+{"id": "macro-4", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "yield-curve-inversion", "text": "the yield curve inverted between short and long-term treasury rates"}
+{"id": "macro-5", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "yield-curve-inversion", "text": "long-term yields fell below short-term yields for the first time this cycle"}
+{"id": "macro-6", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "cpi-inflation-surprise", "text": "consumer price inflation came in hotter than expected for the month"}
+{"id": "macro-7", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "cpi-inflation-surprise", "text": "monthly inflation reading surprised to the upside versus forecasts"}
+{"id": "macro-8", "ticker": "", "alert_type": "MACRO_EVENT", "cluster": "cpi-inflation-surprise", "text": "price index rose faster than economists had projected"}
+{"id": "googl-news-1", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "antitrust-search-ruling", "text": "court ruling found the company maintained an illegal search monopoly"}
+{"id": "googl-news-2", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "antitrust-search-ruling", "text": "judge issued a decision against the company in an antitrust search case"}
+{"id": "googl-news-3", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "antitrust-search-ruling", "text": "regulatory antitrust ruling concluded the company violated competition law"}
+{"id": "googl-news-4", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "ad-revenue-miss-coverage", "text": "multiple outlets reporting weaker than expected advertising revenue"}
+{"id": "googl-news-5", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "ad-revenue-miss-coverage", "text": "coverage highlighting a slowdown in digital advertising sales"}
+{"id": "googl-news-6", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "data-breach", "text": "disclosure of a data breach affecting user account information"}
+{"id": "googl-news-7", "ticker": "GOOGL", "alert_type": "NEWS_SENTIMENT", "cluster": "data-breach", "text": "coverage of a security incident exposing customer data"}
