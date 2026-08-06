@@ -2,9 +2,9 @@
 
 **Multi-agent financial intelligence platform** — grounded research on demand, plus autonomous portfolio surveillance.
 
-Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), **Google Gemini** (reasoning), and **Streamlit** (dashboard) — containerized with Docker. All financial data comes from free, official sources.
+Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), **Google Gemini** (reasoning), and **React + three.js** (dashboard) — containerized with Docker. All financial data comes from free, official sources.
 
-> Status: **Phase 8 complete** — both subsystems are live behind a Streamlit dashboard. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, **deduplicates** it semantically, and gates every HIGH-severity finding behind a **durable human-approval interrupt** before dispatching it to console, file, or email. The whole stack — Qdrant, API, dashboard — is one `docker compose up --build`. See [the phase plan](#phases).
+> Status: **Phase 8 complete** — both subsystems are live behind a React + three.js dashboard built around the approval gate. Research is routed, fanned out, synthesised, **verified**, and **measured** (40 golden questions, 7 evaluators, six named LangSmith experiments). Monitoring watches a ticker list, scores what it finds by rule, **deduplicates** it semantically, and gates every HIGH-severity finding behind a **durable human-approval interrupt** before dispatching it to console, file, or email. The whole stack — Qdrant, API, dashboard — is one `docker compose up --build`. See [the phase plan](#phases).
 
 ## Measured, not asserted
 
@@ -189,20 +189,47 @@ make test                     # unit tests (no network, no LLM spend)
 ### Look at it
 
 ```bash
-./run_api.sh          # backend first
-./run_ui.sh            # then localhost:8501
+./run_api.sh           # backend first
+./run_web.sh           # then localhost:5173
 ```
 
-Six pages over the API — nothing here has its own database connection or graph
-import, it is exactly the HTTP surface above. **Approvals** is the one worth
-opening first: every cycle paused on a HIGH-severity finding, its actual
-alerts, and a decision radio defaulted to Reject — submitting without
-touching anything rejects everything, the same "no explicit approval = not
-dispatched" rule `dispatcher_node` enforces server-side.
+A React + three.js dashboard in [`frontend/`](frontend/), talking to the API
+over plain HTTP and holding no state of its own — nothing here has a database
+connection or a graph import, it is exactly the HTTP surface above.
+
+Five views, organised around the question someone actually opens it to ask:
+
+| View | Answers |
+|---|---|
+| **Desk** | Is there anything I need to do? — and lets you do it, in place |
+| **Ask** | A question, streamed node by node, with every number traceable |
+| **Findings** | What it reported, and underneath each one, what it folded away |
+| **Watchlist** | What it watches, and which names are still cold |
+| **System** | Which allowance ran out, and what is actually configured |
+
+The **Desk** is the one that matters. The approval gate used to be page four
+of six, reached via a banner telling you to go somewhere else; it is now the
+first thing on the first screen. Reject is preselected for every pending
+alert, so submitting an untouched form dispatches nothing — the same "no
+explicit approval = not dispatched" rule `dispatcher_node` enforces
+server-side. On a quiet day — which is most days — the same screen tells you
+what the machine weighed and threw away while you were not looking.
 
 `docker compose up --build` runs the whole stack — Qdrant, API, dashboard —
-in one command; see [`docs/deploy.md`](docs/deploy.md) for putting that on a
-host with a public URL.
+in one command, with the dashboard on **localhost:3000**; see
+[`docs/deploy.md`](docs/deploy.md) for putting that on a host with a public
+URL.
+
+The original Streamlit dashboard is still in [`src/ui/`](src/ui/) as the
+reference implementation of every call the UI makes:
+`./run_ui.sh` for localhost:8501, or `docker compose --profile legacy up -d ui`.
+
+Every endpoint the dashboard uses can be swept against a running backend:
+
+```bash
+python scripts/api_smoke.py                  # free: every read, plus the watchlist round trip
+python scripts/api_smoke.py --query --cycle  # also a real query and a real cycle (both spend)
+```
 
 ### Watch something
 
@@ -292,7 +319,7 @@ This machine already runs a Qdrant on **:6333** owned by another project. FinSig
 | 5 | ✅ Eval suite A: 40 golden questions, 7 evaluators, measured iteration | **LangSmith evals** |
 | 6 | ✅ Monitoring subsystem + the dedup engine | **LangGraph + Qdrant as a data structure** |
 | 7 | ✅ HITL `interrupt` gate, dispatcher, scheduler, eval suite B | **Durable execution** |
-| 8 | ✅ Streamlit dashboard, Docker, public deploy guide | **Consolidation** |
+| 8 | ✅ Dashboard (React + three.js, Streamlit original kept), Docker, public deploy guide | **Consolidation** |
 | 9 | *(stretch)* Hybrid search — sparse + RRF fusion | Advanced Qdrant |
 
 **Phase gate rule:** do not start phase N+1 until phase N is demoable, tested, and committed.
