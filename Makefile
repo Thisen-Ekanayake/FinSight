@@ -29,10 +29,13 @@ help:
 	@echo "  smoke            One traced Gemini call -> prints LangSmith run URL"
 	@echo ""
 	@echo "  api              Start the FastAPI server -> /docs"
-	@echo "  ui               Start the Streamlit dashboard -> :8501 (start api first)"
+	@echo "  web              Start the React dashboard -> :5173 (start api first)"
+	@echo "  web-build        Type-check and build the frontend bundle"
+	@echo "  web-check        Type-check the frontend only"
+	@echo "  ui               Start the legacy Streamlit dashboard -> :8501"
 	@echo "  qdrant           Start FinSight's isolated Qdrant on :6335"
 	@echo "  qdrant-check     Verify FinSight :6335 is up AND Athena :6333 is untouched"
-	@echo "  dev              Start the full stack (qdrant + api + ui)"
+	@echo "  dev              Start the full stack (qdrant + api + web)"
 	@echo "  build            Build the FinSight Docker image"
 	@echo ""
 	@echo "  test             Unit tests only (no network, no LLM quota)"
@@ -126,6 +129,18 @@ format:
 # ── Entrypoints ─────────────────────────────────
 api: .env
 	./run_api.sh
+
+# The dashboard. `web` is the React + three.js frontend and the one to use;
+# `ui` is the Streamlit original, kept as the reference implementation of
+# every call the UI makes.
+web:
+	./run_web.sh
+
+web-build:
+	cd frontend && npm ci && npm run build
+
+web-check:
+	cd frontend && npm run typecheck
 
 ui: .env
 	./run_ui.sh

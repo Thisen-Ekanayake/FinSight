@@ -84,9 +84,28 @@ services:
   # the api one — it is the thing that would move to a different host or a
   # different origin first, and src/api/main.py's wide-open CORS already
   # assumes exactly that split.
+  #
+  # It is a static bundle behind nginx, which also proxies /api to the service
+  # below. The browser therefore only ever sees one origin: "api" is a compose
+  # network name and would not resolve from anyone's laptop.
+  web:
+    build: ./frontend
+    container_name: finsight-web
+    ports: ["3000:8080"]
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The Streamlit dashboard this replaced. Kept because it is the reference
+  # implementation of every call the UI makes and still exercises the same API
+  # — but it does not start by default. Bring it up deliberately:
+  #
+  #   docker compose --profile legacy up -d ui
   ui:
     build: .
     container_name: finsight-ui
+    profiles: ["legacy"]
     command: ["streamlit", "run", "src/ui/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
     ports: ["8501:8501"]
     env_file: .env
