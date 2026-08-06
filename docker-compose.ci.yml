@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════
+# FinSight — CI overlay
+# ═══════════════════════════════════════════════
+#
+# Layered on top of docker-compose.yml by .github/workflows/ci.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build --wait
+#
+# The point of running the REAL compose file in CI is that the thing tested is
+# the thing deployed. This overlay therefore changes as little as possible —
+# only what a runner cannot satisfy, and one rename that makes the stack safe
+# to start on a developer's machine too.
+#
+# ══ THE RENAME IS NOT COSMETIC ══
+#   A different project name gives this stack its own volumes
+#   (finsight-ci_finsight-data, not finsight_finsight-data), which is what
+#   makes `down -v` at the end of the job a safe command instead of a data
+#   loss. The container_name overrides go with it: those are fixed strings in
+#   the base file, so without these the CI stack would collide with a running
+#   dev stack rather than sit beside it.
+# ═══════════════════════════════════════════════
+
+name: finsight-ci
+
+services:
+  qdrant:
+    container_name: finsight-ci-qdrant
+    # A restart loop in CI is a job that hangs until the timeout instead of a
+    # job that fails with the traceback in the log. Same reasoning for api/web.
+    restart: "no"
+
+  api:
+    container_name: finsight-ci-api
+    restart: "no"
+    environment:
+      # aistudio, not vertex: this path authenticates with GOOGLE_API_KEY
+      # instead of Application Default Credentials, so nothing in the job needs
+      # a Google credential file to exist. The key CI supplies is a
+      # placeholder — no request is ever made with it. Selecting the backend
+      # here rather than in the CI .env keeps the reason next to the mount it
+      # explains.
+      GEMINI_BACKEND: aistudio
+    # ══ WHY THE VOLUME LIST IS REPLACED, NOT EXTENDED ══
+    #   The base file bind-mounts the host's ADC file into the container with
+    #   create_host_path: false, which is correct for a laptop and impossible
+    #   on a runner — there is no gcloud login, so the source path does not
+    #   exist and compose refuses to create the container. The base file's own
+    #   comment says to delete this mount on GEMINI_BACKEND=aistudio; !override
+    #   is how a layered file deletes rather than appends.
+    volumes: !override
+      - finsight-data:/app/data
+
+  web:
+    container_name: finsight-ci-web
+    restart: "no"
+
+  # `ui` needs no entry: it sits behind the `legacy` profile and stays down
+  # unless asked for by name.
+
+# The base file pins the network name to "finsight-net", which is a fixed
+# string in the same way the container names are — so a CI stack started
+# beside a dev stack would silently JOIN the dev network rather than get its
+# own ("a network with name finsight-net exists but was not created for
+# project finsight-ci"). Renaming it completes the isolation the project name
+# starts: on a runner this changes nothing, and on a developer's machine it is
+# the difference between two stacks and one confused one.
+networks:
+  default:
+    name: finsight-ci-net

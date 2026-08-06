@@ -24,6 +24,7 @@ data/*
 tests/
 docs/
 evals/
+.github/
 
 *.md
 !README.md

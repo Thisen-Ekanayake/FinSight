@@ -1,0 +1,190 @@
+# ═══════════════════════════════════════════════════════
+# FinSight — Continuous Integration
+# ═══════════════════════════════════════════════════════
+#
+# Three jobs, cheapest first:
+#
+#   backend    flake8 + black + isort + mypy + the unit suite  (~1 min)
+#   frontend   tsc + vite build                                 (~1 min)
+#   stack      builds both images, brings the compose stack up,
+#              and smoke-tests the RUNNING backend              (~5 min)
+#
+# `stack` needs the first two, so a formatting slip fails in a minute
+# instead of after a full image build.
+#
+# ══ WHAT THIS PIPELINE DELIBERATELY DOES NOT RUN ══
+#   • `make evals` — one suite run is real Vertex spend (~$2) and needs
+#     credentials. Eval runs are a human decision, made per experiment, and
+#     recorded in docs/eval_results.md. A schedule that quietly bills the
+#     account every push is not observability, it is a subscription.
+#   • Anything marked `integration` or `llm`. `make test` deselects both, so
+#     the suite here touches no network and no quota.
+#   • `npm run lint` — package.json declares the script but the repo carries
+#     no eslint dependency or config, so it would fail on a missing binary
+#     rather than on a lint error. `npm run typecheck` is the real check.
+#
+# Callable: release.yml runs this whole file via `workflow_call` before it
+# publishes anything, so a tagged image is always one that passed CI.
+# ═══════════════════════════════════════════════════════
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first one's answer irrelevant.
+# Tags and main are exempt by ref, since release.yml calls this workflow and a
+# cancelled verify would block a publish.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # tests/test_edgar.py asserts the CONFIGURED User-Agent is usable, because
+  # the SEC 403s clients it cannot contact and the shipped .env.example value
+  # is a placeholder. Nothing in the unit suite reaches the SEC, so CI supplies
+  # a syntactically valid value rather than a real mailbox — the guard this
+  # test exists for is a human's .env, not a runner's environment.
+  SEC_USER_AGENT: "FinSight-CI/0.1 (ci@finsight.invalid)"
+
+jobs:
+  # ── Python: lint, types, unit tests ──────────────────
+  backend:
+    name: backend · lint + types + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"       # pyproject requires-python = ">=3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # PYTHON=python overrides the Makefile's .venv/bin/python default: the
+      # runner's interpreter is already the only one on PATH. Going through
+      # make rather than repeating the commands keeps CI and a developer's
+      # local `make lint` from drifting apart — there is one definition.
+      - name: Lint (flake8 + black + isort)
+        run: make lint PYTHON=python
+
+      - name: Type-check (mypy)
+        run: make type-check PYTHON=python
+
+      - name: Unit tests
+        run: make test PYTHON=python
+
+  # ── Frontend: type-check and production bundle ───────
+  frontend:
+    name: frontend · typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"           # matches frontend/Dockerfile's node:22-alpine
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      # `npm run build` runs tsc again before vite, which is intentional
+      # duplication: the step above reports type errors on their own line in
+      # the log, and this one proves the bundle the image ships actually builds.
+      - name: Build
+        run: npm run build
+
+  # ── The stack, as it would actually be deployed ──────
+  stack:
+    name: stack · compose up + live API smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # scripts/api_smoke.py runs on the runner, not in a container — the
+      # image copies src/ only. requests is all it imports.
+      - name: Install the smoke test's one dependency
+        run: pip install requests
+
+      # docker-compose.yml declares `env_file: .env`, and .env is gitignored
+      # for the obvious reason. Compose fails outright on a missing env_file,
+      # so CI writes one. Every value in it is a placeholder: this job never
+      # makes an LLM call, so the backend only has to START with a key-shaped
+      # string, not authenticate with it.
+      - name: Write a CI .env (placeholders only — no secrets in this job)
+        run: |
+          cp .env.example .env
+          cat >> .env <<'EOF'
+
+          # ── appended by .github/workflows/ci.yml ──
+          GOOGLE_API_KEY=ci-placeholder-never-authenticates
+          SEC_USER_AGENT=FinSight-CI/0.1 (ci@finsight.invalid)
+          LANGSMITH_TRACING=false
+          ENVIRONMENT=ci
+          EOF
+
+      # --wait blocks until every service reports healthy, so the smoke test
+      # below never races a container that is still opening its checkpointer.
+      - name: Build and start the stack
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            up -d --build --wait --wait-timeout 300
+
+      # The real test: every endpoint the dashboard calls, against a running
+      # backend, checked for the shape frontend/src/api/types.ts expects.
+      # Free by default — --query and --cycle are the two that spend, and
+      # neither is passed here.
+      - name: Smoke-test the running API
+        run: python scripts/api_smoke.py
+        env:
+          API_URL: http://localhost:8000
+
+      # nginx serving the bundle, and nginx proxying /api to a container the
+      # browser cannot resolve by name. Both are deployment-shaped failures
+      # that no unit test can see.
+      - name: Smoke-test the dashboard container
+        run: |
+          echo "── the bundle is served ──"
+          curl -fsS http://localhost:3000/ | grep -q '<div id="root"></div>'
+
+          echo "── SPA fallback: an unknown path still lands on index.html ──"
+          curl -fsS http://localhost:3000/no/such/route | grep -q '<div id="root"></div>'
+
+          echo "── /api proxies through to the api service ──"
+          test "$(curl -fsS http://localhost:3000/api/health | jq -r .status)" = "ok"
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml logs --no-color --tail 200
+
+      # -v is safe here and ONLY here: the CI overlay renames the project, so
+      # the volumes destroyed are finsight-ci_*. Never run this against the
+      # default project on a machine that holds real data.
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml \
+            down -v --remove-orphans
