@@ -8,6 +8,7 @@ name = "finsight"
 version = "0.1.0"
 description = "Multi-agent financial intelligence platform — grounded research + autonomous portfolio surveillance"
 requires-python = ">=3.12"
+license = { file = "LICENSE" }
 
 # ── Black (Code Formatter) ──────────────────────
 [tool.black]
