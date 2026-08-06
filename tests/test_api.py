@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -591,6 +592,45 @@ class TestMonitorRoutes:
             body = client.get("/monitor/cycles/c-done/pending").json()
 
         assert body == []
+
+    def test_pending_alerts_are_read_off_the_event_loop_thread(self, client):
+        """
+        pending_alerts_for makes a SYNCHRONOUS graph.get_state call, and the
+        app holds an AsyncSqliteSaver — which raises InvalidStateError for a
+        sync call originating on a thread that is running the event loop. So
+        the route has to hop to a worker thread, exactly as the two
+        cycle-running routes already do.
+
+        ══ WHY THE ASSERTION IS "no running loop" AND NOT A THREAD ID ══
+          TestClient already runs the app on its own portal thread, so
+          comparing thread identities against the test's would pass whether
+          the route hopped or not. The condition that actually matters is the
+          one the saver itself tests: whether a loop is running on THIS
+          thread. asyncio.get_running_loop() raising RuntimeError is the
+          worker thread; it succeeding means the sync call is happening
+          inside the coroutine, which is the bug.
+
+          Every other test here patches pending_alerts_for with a plain
+          function that does not care, which is exactly why a live request
+          500'd on the endpoint the whole approval queue is built on while
+          the suite stayed green.
+        """
+        observed: dict[str, bool] = {}
+
+        def record_context(cycle_id, *, checkpointer):
+            try:
+                asyncio.get_running_loop()
+                observed["on_loop_thread"] = True
+            except RuntimeError:
+                observed["on_loop_thread"] = False
+            return []
+
+        with patch("src.monitor.graph.pending_alerts_for", record_context):
+            assert client.get("/monitor/cycles/c-done/pending").status_code == 200
+
+        assert (
+            observed["on_loop_thread"] is False
+        ), "pending_alerts_for ran on a thread with a live event loop — a real AsyncSqliteSaver refuses that"
 
     def test_a_cycle_that_pauses_reports_pending_approval(self, client):
         """

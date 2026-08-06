@@ -237,6 +237,14 @@ async def get_pending_alerts(cycle_id: str, http_request: Request) -> list[Alert
     currently paused — the dashboard can't tell "wrong id" from "already
     resolved" from this alone, which is fine: either way there is nothing
     left to decide.
+
+    ══ WHY to_thread FOR WHAT LOOKS LIKE A PLAIN READ ══
+      pending_alerts_for calls the SYNCHRONOUS graph.get_state. The app holds
+      an AsyncSqliteSaver, which refuses a sync call made from the thread that
+      owns the event loop and raises asyncio.InvalidStateError — a 500 on the
+      one endpoint the approval queue is built on. Hopping to a worker thread
+      is what makes the sync interface legal, and is exactly what the two
+      cycle-running routes above already do for the same saver.
     """
     from src.monitor.graph import pending_alerts_for
 
@@ -244,7 +252,7 @@ async def get_pending_alerts(cycle_id: str, http_request: Request) -> list[Alert
     if checkpointer is None:
         raise HTTPException(status_code=500, detail="No checkpointer configured")
 
-    pending = pending_alerts_for(cycle_id, checkpointer=checkpointer)
+    pending = await asyncio.to_thread(pending_alerts_for, cycle_id, checkpointer=checkpointer)
     return [_alert_out(dict(alert)) for alert in pending]
 
 
