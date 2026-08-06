@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FinSight</title>
+    <meta name="description" content="Multi-agent financial research with enforced citations, and a watcher that stops for a human before it sends anything." />
+
+    <!--
+      The fonts the design system is drawn in. Loaded from Google rather than
+      vendored, with system-ui behind them in tokens.css: a deploy with no
+      outbound internet still renders, it just renders in the fallback.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <!--
+      Resolve the theme before first paint. Without this the page renders light
+      and then flips, which on a dashboard someone opens twice a day is the
+      first thing they see. Mirrors useTheme's resolution exactly.
+    -->
+    <script>
+      (function () {
+        try {
+          var setting = localStorage.getItem('finsight.theme') || 'auto';
+          var dark =
+            setting === 'dark' ||
+            (setting === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
