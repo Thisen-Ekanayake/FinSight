@@ -1,0 +1,127 @@
+# ═══════════════════════════════════════════════════════
+# FinSight — Release (the CD half)
+# ═══════════════════════════════════════════════════════
+#
+# Tag a commit, get two published images:
+#
+#   ghcr.io/<owner>/finsight-api    the FastAPI backend  (./Dockerfile)
+#   ghcr.io/<owner>/finsight-web    the dashboard        (./frontend/Dockerfile)
+#
+#   git tag -a v0.9.0 -m "Phase 8" && git push origin v0.9.0
+#
+# ══ THIS PUBLISHES. IT DOES NOT DEPLOY. ══
+#   Nothing here touches a server. docs/deploy.md is a guide a human follows
+#   on a host they control, and deploying is `docker compose pull && up -d`
+#   on that host — a deliberate act, not a side effect of pushing a tag.
+#   There is no production environment for this pipeline to reach into, and
+#   inventing one that quietly restarts a live stack on every tag would be a
+#   worse portfolio answer than this one.
+#
+# ══ WHY TAGS ONLY, NOT EVERY PUSH TO MAIN ══
+#   ci.yml already runs on main. Publishing there too would mean two runs of
+#   the same pipeline per push (this workflow calls ci.yml), for an image
+#   nobody asked for. A release is a decision; the tag is where it is recorded.
+# ═══════════════════════════════════════════════════════
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build both images but do not push them"
+        type: boolean
+        default: true
+
+jobs:
+  # The same CI file, whole. A published tag is by construction one that
+  # passed lint, types, the unit suite, and the live stack smoke test.
+  verify:
+    name: verify
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: publish · ${{ matrix.image }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write            # the only elevated scope: pushing to GHCR
+    strategy:
+      fail-fast: false           # a web-image failure should not hide an api one
+      matrix:
+        include:
+          - image: finsight-api
+            context: .
+            dockerfile: ./Dockerfile
+          - image: finsight-web
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR paths must be lowercase; GitHub owner names need not be. A repo
+      # under "Thisen-Ekanayake" pushes to ghcr.io/thisen-ekanayake/... and
+      # using the raw context value here is a 403 that reads like an auth
+      # problem.
+      - name: Resolve the registry namespace
+        id: ns
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # scoped to this run, expires with it
+
+      # v1.2.3 -> :1.2.3, :1.2, :latest — so a deploy can pin exactly, track a
+      # minor line, or follow the newest, and the choice is the operator's.
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.ns.outputs.owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.description=FinSight — multi-agent financial intelligence platform
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ !inputs.dry_run }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache in GHA storage. The api image reinstalls ~40 pinned
+          # dependencies including onnxruntime; without this every release
+          # pays for that again.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Summarise
+        run: |
+          {
+            echo "### ${{ matrix.image }}"
+            echo ""
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "Dry run — built, not pushed. Would have published:"
+            else
+              echo "Published:"
+            fi
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
