@@ -40,7 +40,11 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # consistent with the non-root ports the rest of the stack uses.
 EXPOSE 8080
 
+# 127.0.0.1, not localhost. The alpine image's /etc/hosts maps localhost to
+# both 127.0.0.1 and ::1, wget tries the IPv6 address first, and nginx's
+# `listen 8080;` binds IPv4 only — so the probe was answering "connection
+# refused" against a server that was serving every real request perfectly.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget -q --spider http://localhost:8080/ || exit 1
+    CMD wget -q --spider http://127.0.0.1:8080/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]
