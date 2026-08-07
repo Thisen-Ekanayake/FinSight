@@ -179,14 +179,18 @@ def validate_llm_credentials() -> None:
             "  Set GOOGLE_CLOUD_PROJECT in .env (see docs/api_keys.md)."
         )
 
-    adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
-    explicit = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if not explicit and not adc_path.is_file():
+    import google.auth
+    import google.auth.exceptions
+
+    try:
+        google.auth.default()
+    except google.auth.exceptions.DefaultCredentialsError as exc:
         raise MissingCredentialError(
             "GEMINI_BACKEND=vertex but no Application Default Credentials found.\n"
             "  Run:  gcloud auth application-default login\n"
-            "  Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path."
-        )
+            "  Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path.\n"
+            "  Or run on GCE/Cloud Run/GKE with a service account attached."
+        ) from exc
 
 
 def ensure_data_dirs() -> None:

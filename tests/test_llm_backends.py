@@ -30,21 +30,21 @@ class TestValidateLlmCredentials:
                 config.validate_llm_credentials()
 
     def test_vertex_requires_adc_or_explicit_credentials(self):
+        import google.auth.exceptions
+
         with (
             patch.object(config, "GEMINI_BACKEND", "vertex"),
             patch.object(config, "GCP_PROJECT", "some-project"),
-            patch("pathlib.Path.is_file", return_value=False),
-            patch.dict("os.environ", {}, clear=True),
+            patch("google.auth.default", side_effect=google.auth.exceptions.DefaultCredentialsError("no creds")),
         ):
             with pytest.raises(MissingCredentialError, match="application-default login"):
                 config.validate_llm_credentials()
 
-    def test_vertex_accepts_explicit_service_account_path(self):
+    def test_vertex_passes_when_credentials_resolve(self):
         with (
             patch.object(config, "GEMINI_BACKEND", "vertex"),
             patch.object(config, "GCP_PROJECT", "some-project"),
-            patch("pathlib.Path.is_file", return_value=False),
-            patch.dict("os.environ", {"GOOGLE_APPLICATION_CREDENTIALS": "/tmp/sa.json"}),
+            patch("google.auth.default", return_value=(MagicMock(), "some-project")),
         ):
             config.validate_llm_credentials()
 
