@@ -101,7 +101,7 @@ class TestGetLlm:
             patch("langchain_google_genai.ChatGoogleGenerativeAI", fake_cls),
             patch.object(config, "GEMINI_BACKEND", "vertex"),
             patch.object(config, "GCP_PROJECT", "proj-1"),
-            patch("pathlib.Path.is_file", return_value=True),
+            patch("google.auth.default", return_value=(MagicMock(), "proj-1")),
         ):
             llm.get_llm("flash")
 
