@@ -60,7 +60,10 @@ APScheduler
 python-dotenv
 
 # ── UI (Phase 8) ──────────────────────────────────
-streamlit
+# Pinned: test_ui_pages.py depends on AppTest.from_file's relative-path
+# resolution, which changed between 1.60.0 and 1.61.1 and broke CI (which
+# installs fresh) without breaking local runs (which don't auto-upgrade).
+streamlit==1.60.0
 plotly
 
 # ── Dev ───────────────────────────────────────────
