@@ -20,11 +20,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api/client';
-import type { QueryResponse, RunSummary, StreamEvent } from '../api/types';
+import type { QueryResponse, RunSummary, SeriesPoint, StreamEvent } from '../api/types';
 import { useResource } from '../hooks/useResource';
 import { ErrorNote, Kicker, PageHead } from '../components/primitives';
 import { renderAnswer, unlocatedClaims } from '../lib/answer';
-import { percent, plural, seconds, stamp } from '../lib/format';
+import { compact, humanise, percent, plural, seconds, stamp } from '../lib/format';
+import type { PlotPoint } from '../viz/plot';
+import { BarChart, LineChart, PlotLegend, PlotSource } from '../viz/plot';
 
 /**
  * What each graph node is doing, in the words of someone who does not have
@@ -312,6 +314,8 @@ function Answer({ result }: { result: QueryResponse }) {
         <div style={{ marginBottom: 34 }} />
       )}
 
+      <SeriesCharts series={result.series} />
+
       <div
         style={{
           display: 'flex',
@@ -400,6 +404,148 @@ function Answer({ result }: { result: QueryResponse }) {
         {result.thread_id}
       </p>
     </section>
+  );
+}
+
+interface MetricChart {
+  metric: string;
+  unit: string | null;
+  periods: string[];
+  byTicker: { ticker: string; points: PlotPoint[] }[];
+  providers: string[];
+  pointCount: number;
+}
+
+/** "FY2025", "2025 FY" and "2025-09-27" all order by the year they name. */
+function byPeriod(a: string, b: string): number {
+  const ya = Number(a.match(/\d{4}/)?.[0] ?? Number.NaN);
+  const yb = Number(b.match(/\d{4}/)?.[0] ?? Number.NaN);
+  if (Number.isFinite(ya) && Number.isFinite(yb) && ya !== yb) return ya - yb;
+  return a.localeCompare(b);
+}
+
+/**
+ * Group a run's points into one chart per metric.
+ *
+ * Per metric rather than per ticker, because revenue and gross margin share no
+ * axis: one is dollars in the hundreds of billions, the other a percentage
+ * under 100. On a common axis the percentage becomes a flat line along the
+ * floor, which looks like a finding and is an artefact of the scale.
+ */
+function groupSeries(series: SeriesPoint[]): MetricChart[] {
+  const byMetric = new Map<string, SeriesPoint[]>();
+  for (const point of series) {
+    const bucket = byMetric.get(point.metric);
+    if (bucket) bucket.push(point);
+    else byMetric.set(point.metric, [point]);
+  }
+
+  const charts: MetricChart[] = [];
+
+  for (const [metric, points] of byMetric) {
+    const periods = [...new Set(points.map((p) => p.period))].sort(byPeriod);
+    const tickers = [...new Set(points.map((p) => p.ticker))].sort();
+
+    charts.push({
+      metric,
+      unit: points[0]?.unit ?? null,
+      periods,
+      byTicker: tickers.map((ticker) => ({
+        ticker,
+        points: periods.map((period) => {
+          const hit = points.find((p) => p.ticker === ticker && p.period === period);
+          // NaN, not 0, for a period a company did not report. Zero is a
+          // value, and a missing filing drawn at zero is a fabricated cliff.
+          return { label: period, value: hit ? hit.value : Number.NaN };
+        }),
+      })),
+      providers: [...new Set(points.map((p) => p.provider).filter((p): p is string => Boolean(p)))],
+      pointCount: points.length,
+    });
+  }
+
+  return charts.sort((a, b) => a.metric.localeCompare(b.metric));
+}
+
+/** Axis labels in the metric's own unit — a percentage is not a dollar. */
+function axisFormat(unit: string | null): (value: number) => string {
+  const u = unit?.toLowerCase() ?? '';
+  if (u.includes('percent') || u === '%') return (v) => `${compact(v)}%`;
+  if (u === 'usd' || u.includes('dollar')) return (v) => `$${compact(v)}`;
+  return compact;
+}
+
+/**
+ * The filed figures behind the answer.
+ *
+ * ══ WHY A CHART CAN BE ABSENT ══
+ *   Most questions produce no series at all — only the fundamentals
+ *   specialist reports figures that belong to reporting periods, and a
+ *   question about press coverage or price action has nothing to put on an
+ *   axis. This renders nothing rather than an empty frame, because a blank
+ *   chart reads as a failure when it is simply the wrong shape of question.
+ *
+ *   A single point is also dropped. One reading is not a trend, and drawing
+ *   an axis around a lone value dresses a number the prose already gave as
+ *   though it were an analysis.
+ */
+function SeriesCharts({ series }: { series: SeriesPoint[] }) {
+  const charts = useMemo(() => groupSeries(series).filter((c) => c.pointCount > 1), [series]);
+  if (charts.length === 0) return null;
+
+  return (
+    <section style={{ marginBottom: 34 }}>
+      <Kicker>The filed figures</Kicker>
+      <div style={{ display: 'grid', gap: 30 }}>
+        {charts.map((chart) => (
+          <MetricPlot key={chart.metric} chart={chart} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MetricPlot({ chart }: { chart: MetricChart }) {
+  const format = axisFormat(chart.unit);
+  const trend = chart.periods.length > 1;
+  const names = chart.byTicker.map((s) => s.ticker);
+  const title = `${humanise(chart.metric)} by ${trend ? 'reporting period' : 'ticker'}`;
+  const span = trend ? `${chart.periods[0]}–${chart.periods[chart.periods.length - 1]}` : chart.periods[0];
+
+  return (
+    <div>
+      <p
+        className="mono"
+        style={{ fontSize: 12, letterSpacing: '0.06em', color: 'var(--ink-70)', margin: '0 0 10px' }}
+      >
+        {humanise(chart.metric)}
+        {chart.unit ? ` · ${chart.unit}` : ''}
+      </p>
+
+      {trend ? (
+        <>
+          <LineChart
+            series={chart.byTicker.map((s) => ({ name: s.ticker, points: s.points }))}
+            format={format}
+            title={title}
+          />
+          <PlotLegend names={names} />
+        </>
+      ) : (
+        <BarChart
+          points={chart.byTicker.map((s) => ({ label: s.ticker, value: s.points[0]?.value ?? Number.NaN }))}
+          format={format}
+          title={title}
+        />
+      )}
+
+      {/* Provenance, not decoration: the fundamentals chain falls through
+          EDGAR -> yfinance -> FMP, and a fallback estimate must not be
+          presented with the authority of a filed figure. */}
+      <PlotSource>
+        {span} · {chart.providers.length > 0 ? chart.providers.join(', ') : 'source not recorded'}
+      </PlotSource>
+    </div>
   );
 }
 

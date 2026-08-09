@@ -90,6 +90,32 @@ export function percent(fraction: number | null | undefined, digits = 0): string
   return `${(fraction * 100).toFixed(digits)}%`;
 }
 
+/**
+ * A financial magnitude at reading length: 416161000000 -> "416.2B".
+ *
+ * Thousands, never 1024 — these are dollars and share counts, not bytes.
+ * Trailing zeros are dropped only after a decimal point, so an axis tick of
+ * 100 stays "100" rather than collapsing to "1".
+ */
+export function compact(value: number): string {
+  if (!Number.isFinite(value)) return '—';
+
+  const abs = Math.abs(value);
+  const [div, suffix] =
+    abs >= 1e12
+      ? ([1e12, 'T'] as const)
+      : abs >= 1e9
+        ? ([1e9, 'B'] as const)
+        : abs >= 1e6
+          ? ([1e6, 'M'] as const)
+          : abs >= 1e3
+            ? ([1e3, 'k'] as const)
+            : ([1, ''] as const);
+
+  const text = (value / div).toFixed(suffix ? 1 : 2);
+  return `${text.includes('.') ? text.replace(/\.?0+$/, '') : text}${suffix}`;
+}
+
 /** "1 decision" / "3 decisions". */
 export function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`;
