@@ -53,7 +53,7 @@ export function App() {
           />
         ) : null}
         {view === 'ask' ? <Ask /> : null}
-        {view === 'findings' ? <Findings onCycleFinished={pending.reload} /> : null}
+        {view === 'findings' ? <Findings onCycleFinished={pending.reload} vizColors={vizColors} /> : null}
         {view === 'watchlist' ? <Watchlist /> : null}
         {view === 'system' ? <System /> : null}
       </div>

@@ -27,6 +27,9 @@ import { useResource } from '../hooks/useResource';
 import { Blueprint, Empty, ErrorNote, Kicker, Loading, PageHead, SeverityMark } from '../components/primitives';
 import { clock, humanise, plural, seconds, severityInk, stamp } from '../lib/format';
 import { BarChart, FunnelBars, PlotSource } from '../viz/plot';
+import type { VizColors } from '../viz/ambient';
+import type { DedupPoint } from '../viz/dedupSpace';
+import { DedupSpace } from '../components/DedupSpace';
 
 type Filter = 'any' | 'HIGH' | 'MED' | 'LOW';
 
@@ -38,7 +41,7 @@ const DECISION_LABELS: Record<string, string> = {
   ESCALATE: 'SECOND LOOK',
 };
 
-export function Findings({ onCycleFinished }: { onCycleFinished: () => void }) {
+export function Findings({ onCycleFinished, vizColors }: { onCycleFinished: () => void; vizColors: VizColors }) {
   const [filter, setFilter] = useState<Filter>('any');
   const [open, setOpen] = useState<string | null>(null);
   const [runState, setRunState] = useState<{ busy: boolean; note: string | null; error: string | null }>({
@@ -150,7 +153,7 @@ export function Findings({ onCycleFinished }: { onCycleFinished: () => void }) {
         />
       ))}
 
-      <DedupMix decisions={decisions.data ?? []} />
+      <DedupMix decisions={decisions.data ?? []} vizColors={vizColors} tauHigh={tauHigh} tauLow={tauLow} />
 
       <Runs cycles={cycles.data} error={cycles.error} />
     </main>
@@ -300,7 +303,55 @@ function Finding({
  * Drawn from /monitor/decisions, which is deliberately NOT the severity-filtered
  * alert list — a mix computed from a filtered view would describe the filter.
  */
-function DedupMix({ decisions }: { decisions: DedupDecision[] }) {
+/** Which outcome a raw decision belongs to, for both the bars and the volume. */
+function outcomeOf(decision: string): DedupPoint['kind'] {
+  if (decision === 'FIRE') return 'reported';
+  if (decision === 'ESCALATE') return 'second-look';
+  return 'folded';
+}
+
+/**
+ * Project the decision log into the unit cube the 3D view expects.
+ *
+ * Time is normalised across the log's own span rather than a fixed window, so
+ * a log covering an hour and one covering a month both fill the axis. Tickers
+ * become evenly spaced lanes — the depth axis is categorical, and the spacing
+ * carries no magnitude.
+ */
+function toSpace(decisions: DedupDecision[]): { points: DedupPoint[]; tickers: string[] } {
+  const tickers = [...new Set(decisions.map((d) => d.ticker))].sort();
+  const times = decisions.map((d) => new Date(d.decided_at).valueOf()).filter(Number.isFinite);
+  const first = times.length > 0 ? Math.min(...times) : 0;
+  const last = times.length > 0 ? Math.max(...times) : 1;
+  const span = last - first || 1;
+
+  const points = decisions.map((decision) => {
+    const at = new Date(decision.decided_at).valueOf();
+    const lane = tickers.indexOf(decision.ticker);
+    return {
+      t: Number.isFinite(at) ? (at - first) / span : 0.5,
+      score: Number.isFinite(decision.score) ? decision.score : 0,
+      // Centre a single ticker rather than pinning it to the near wall.
+      lane: tickers.length > 1 ? lane / (tickers.length - 1) : 0.5,
+      kind: outcomeOf(decision.decision),
+    };
+  });
+
+  return { points, tickers };
+}
+
+function DedupMix({
+  decisions,
+  vizColors,
+  tauHigh,
+  tauLow,
+}: {
+  decisions: DedupDecision[];
+  vizColors: VizColors;
+  tauHigh: number | undefined;
+  tauLow: number | undefined;
+}) {
+  const space = useMemo(() => toSpace(decisions), [decisions]);
   const rows = useMemo(() => {
     const counts = new Map<string, number>();
     for (const decision of decisions) {
@@ -337,6 +388,51 @@ function DedupMix({ decisions }: { decisions: DedupDecision[] }) {
       </p>
       <FunnelBars rows={rows} />
       <PlotSource>{plural(decisions.length, 'decision')} across the recent log</PlotSource>
+
+      {/* The volume comes after the counts, never instead of them. A WebGL
+          canvas is unreadable to a screen reader and absent entirely without
+          a GPU, so the bars above carry the same finding unconditionally.
+
+          It also waits for the real thresholds. Defaulting to 0.89/0.74 would
+          draw two planes in the wrong place and present them as the engine's
+          — the same trap this file's header calls out for the prose. */}
+      {tauHigh !== undefined && tauLow !== undefined ? (
+      <div style={{ marginTop: 34 }}>
+        <Kicker style={{ marginBottom: 4 }}>Where each call landed</Kicker>
+        <p style={{ fontSize: 14, color: 'var(--ink-62)', margin: '0 0 14px', maxWidth: '58ch' }}>
+          Every judged candidate placed by when it was seen, how similar the engine found it, and which ticker it
+          belonged to. The two planes are the thresholds — a point's side of a plane is the decision. Drag to turn it.
+        </p>
+
+        <Blueprint style={{ padding: 10 }}>
+          <DedupSpace
+            colors={vizColors}
+            points={space.points}
+            thresholds={{ high: tauHigh, low: tauLow }}
+            label={`${plural(decisions.length, 'dedup decision')} plotted by time, similarity and ticker, with the fold threshold at ${tauHigh} and the second-look threshold at ${tauLow}.`}
+          />
+        </Blueprint>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, marginTop: 12 }}>
+          {[
+            { shape: '◆', label: 'reported', ink: 'var(--color-accent)' },
+            { shape: '■', label: 'folded in', ink: 'var(--ink-52)' },
+            { shape: '▲', label: 'second look', ink: 'var(--alert-ink)' },
+            { shape: '▬', label: `fold line · ${tauHigh}`, ink: 'var(--color-accent)' },
+            { shape: '▬', label: `second look · ${tauLow}`, ink: 'var(--alert-ink)' },
+          ].map((item) => (
+            <span key={item.label} className="mono" style={{ fontSize: 11.5, color: 'var(--ink-62)' }}>
+              <span style={{ color: item.ink }}>{item.shape}</span> {item.label}
+            </span>
+          ))}
+        </div>
+
+        <PlotSource>
+          {plural(space.tickers.length, 'ticker')} across the depth axis · similarity is cosine distance between
+          embeddings, not a probability
+        </PlotSource>
+      </div>
+      ) : null}
     </section>
   );
 }
