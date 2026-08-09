@@ -113,12 +113,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ``POST /monitor/cycles/{id}/resume`` expects to find a paused cycle in.
     """
     from src.monitor.scheduler import start_scheduler, stop_scheduler
+    from src.vectorstore.collections import ensure_collections
 
     configure_logging()
     configure_tracing()
     init_db()
 
     client, detail = _connect_qdrant()
+
+    # The collections have to exist before anything reads them, and the monitor
+    # is what breaks first: a dedup lookup against a missing collection raises
+    # rather than returning no matches, so on a fresh deploy the first cycle
+    # dies in alert_synthesizer with a bare Qdrant 404. src/monitor/cli.py calls
+    # this for exactly that reason — the API needs it too, because the UI and
+    # the scheduler both reach run_cycle through here and never touch the CLI.
+    #
+    # Idempotent (see ensure_collection), so on every later boot this is two
+    # existence checks. Non-fatal by the same logic as _connect_qdrant above:
+    # a degraded API that still answers research questions beats one that
+    # refuses to start, and /health already reports the Qdrant state.
+    if client is not None:
+        try:
+            for name, created in ensure_collections().items():
+                if created:
+                    logger.info("Created Qdrant collection %s", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not ensure Qdrant collections (%s) — monitor cycles will fail", exc)
 
     async with async_checkpointer() as saver:
         app.state.checkpointer = saver
