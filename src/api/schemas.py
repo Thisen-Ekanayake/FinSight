@@ -175,6 +175,9 @@ class HealthResponse(BaseModel):
     checkpointer: bool
     qdrant: bool
     qdrant_detail: str
+    # {collection_name: exists}. None when Qdrant itself could not be asked,
+    # which is a different thing from "asked, and the collections are missing".
+    qdrant_collections: dict[str, bool] | None = None
     scheduler_enabled: bool
     scheduler_next_run_at: str | None = None
 

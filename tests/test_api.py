@@ -162,6 +162,22 @@ def _default_history() -> list[_Snapshot]:
     ]
 
 
+class _StubQdrant:
+    """
+    Stand-in for QdrantClient covering only what /health calls.
+
+    A bare object() will not do any more: /health now asks the client which
+    collections exist, so the stub has to be able to answer.
+    """
+
+    def __init__(self, present: set[str] | None = None) -> None:
+        # None means "every collection exists" — the healthy default.
+        self._present = present
+
+    def collection_exists(self, name: str) -> bool:
+        return True if self._present is None else name in self._present
+
+
 @pytest.fixture
 def client(tmp_path):
     """
@@ -182,7 +198,11 @@ def client(tmp_path):
         patch.object(db_module, "DATABASE_URL", f"sqlite:///{tmp_path / 'api.db'}"),
         patch.object(main_module, "async_checkpointer", fake_checkpointer),
         patch.object(main_module, "build_research_graph", lambda checkpointer=None: graph),
-        patch.object(main_module, "_connect_qdrant", lambda: (object(), "connected")),
+        patch.object(main_module, "_connect_qdrant", lambda: (_StubQdrant(), "connected")),
+        # The lifespan creates the collections on boot. Left real, it would open
+        # a socket to whatever is on QDRANT_URL — which this file promises not
+        # to do, and which would make the suite depend on a running Qdrant.
+        patch("src.vectorstore.collections.ensure_collections", lambda: {}),
     ):
         app = main_module.create_app()
         with TestClient(app) as test_client:
@@ -208,6 +228,42 @@ class TestHealth:
         body = client.get("/health").json()
         assert body["scheduler_enabled"] is False
         assert body["scheduler_next_run_at"] is None
+
+    def test_reports_each_collection_present(self, client):
+        body = client.get("/health").json()
+        assert body["qdrant_collections"] == {"finsight_filings": True, "finsight_alerts": True}
+        assert "MISSING" not in body["qdrant_detail"]
+
+    def test_names_a_missing_collection(self, client):
+        """
+        Reachable-but-empty is precisely the state that hid a real outage: the
+        API reported qdrant_detail "connected" while every monitor cycle died
+        on a 404 from the dedup lookup. Connectivity is not readiness.
+        """
+        client.app.state.qdrant = _StubQdrant(present={"finsight_filings"})
+
+        body = client.get("/health").json()
+
+        assert body["qdrant_collections"] == {"finsight_filings": True, "finsight_alerts": False}
+        assert "MISSING collections: finsight_alerts" in body["qdrant_detail"]
+
+    def test_survives_a_qdrant_that_cannot_be_asked(self, client):
+        """
+        A collection check that raises must not take /health down with it, and
+        must stay distinguishable from a definite "the collection is missing".
+        """
+
+        class _Dead:
+            def collection_exists(self, name: str) -> bool:
+                raise ConnectionError("qdrant went away")
+
+        client.app.state.qdrant = _Dead()
+
+        body = client.get("/health").json()
+
+        assert body["status"] == "ok"
+        assert body["qdrant_collections"] is None
+        assert "collection check failed: ConnectionError" in body["qdrant_detail"]
 
 
 class TestQuery:
