@@ -26,6 +26,7 @@ import type { Alert, Cycle, DedupDecision } from '../api/types';
 import { useResource } from '../hooks/useResource';
 import { Blueprint, Empty, ErrorNote, Kicker, Loading, PageHead, SeverityMark } from '../components/primitives';
 import { clock, humanise, plural, seconds, severityInk, stamp } from '../lib/format';
+import { BarChart, FunnelBars, PlotSource } from '../viz/plot';
 
 type Filter = 'any' | 'HIGH' | 'MED' | 'LOW';
 
@@ -148,6 +149,8 @@ export function Findings({ onCycleFinished }: { onCycleFinished: () => void }) {
           tauLow={tauLow}
         />
       ))}
+
+      <DedupMix decisions={decisions.data ?? []} />
 
       <Runs cycles={cycles.data} error={cycles.error} />
     </main>
@@ -285,9 +288,75 @@ function Finding({
  * nothing else on this screen answers it — a quiet day and a broken scheduler
  * look identical from an empty findings list alone.
  */
+/**
+ * What the dedup engine decided, in aggregate.
+ *
+ * The per-alert log below already shows each fold in its own words. This is
+ * the shape of the whole log: a system that reports one candidate in five is
+ * doing the job the page's header claims for it, and a system that folds
+ * nothing is either seeing genuinely distinct events or quietly broken. Both
+ * readings need the totals, and neither survives scrolling a list of decimals.
+ *
+ * Drawn from /monitor/decisions, which is deliberately NOT the severity-filtered
+ * alert list — a mix computed from a filtered view would describe the filter.
+ */
+function DedupMix({ decisions }: { decisions: DedupDecision[] }) {
+  const rows = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const decision of decisions) {
+      const label = DECISION_LABELS[decision.decision] ?? decision.decision;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    // Reported first, then the folds, then whatever the backend added that
+    // this file has no label for — an unknown decision is worth seeing, not
+    // worth hiding behind a sort that buries it.
+    const order = ['REPORTED', 'FOLDED IN', 'MERGED', 'SECOND LOOK'];
+    return [...counts.entries()]
+      .sort((a, b) => {
+        const ia = order.indexOf(a[0]);
+        const ib = order.indexOf(b[0]);
+        return (ia < 0 ? order.length : ia) - (ib < 0 ? order.length : ib);
+      })
+      .map(([label, value]) => ({
+        label: label.toLowerCase(),
+        value,
+        tone: label === 'SECOND LOOK' ? 'var(--alert)' : undefined,
+      }));
+  }, [decisions]);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <section style={{ marginTop: 56 }}>
+      <h2 style={{ fontFamily: 'var(--font-heading)', fontWeight: 600, fontSize: 24, margin: '0 0 6px' }}>
+        What was weighed
+      </h2>
+      <p style={{ fontSize: 14, color: 'var(--ink-62)', margin: '0 0 18px', maxWidth: '58ch' }}>
+        Every candidate the engine judged, by what it decided. Folding is the expected outcome, not an error — the
+        same event reaches us from several sources at once.
+      </p>
+      <FunnelBars rows={rows} />
+      <PlotSource>{plural(decisions.length, 'decision')} across the recent log</PlotSource>
+    </section>
+  );
+}
+
 function Runs({ cycles, error }: { cycles: Cycle[] | null; error: string | null }) {
   if (error) return <ErrorNote error={error} />;
   if (!cycles || cycles.length === 0) return null;
+
+  // Oldest first: a run chart reads left to right in time, and the list below
+  // stays newest first because that is the order you read findings in.
+  const charted = [...cycles].reverse();
+  const totals = cycles.reduce(
+    (acc, c) => ({
+      seen: acc.seen + c.candidate_count,
+      reported: acc.reported + c.fired_count,
+      folded: acc.folded + c.suppressed_count + c.merged_count,
+      errors: acc.errors + c.error_count,
+    }),
+    { seen: 0, reported: 0, folded: 0, errors: 0 },
+  );
 
   return (
     <section style={{ marginTop: 56 }}>
@@ -296,6 +365,24 @@ function Runs({ cycles, error }: { cycles: Cycle[] | null; error: string | null 
         One complete pass of the watching machine. Most of what a run sees never becomes a finding, and that is the
         engine working.
       </p>
+
+      {/* Only worth drawing once there are two runs to compare. A single
+          column is a number with axes drawn around it. */}
+      {charted.length > 1 ? (
+        <div style={{ marginBottom: 28 }}>
+          <BarChart
+            points={charted.map((cycle) => ({ label: clock(cycle.started_at), value: cycle.fired_count }))}
+            format={(v) => String(Math.round(v))}
+            title="Findings reported per run"
+            height={190}
+          />
+          <PlotSource>
+            {totals.seen.toLocaleString()} seen · {totals.reported.toLocaleString()} reported ·{' '}
+            {totals.folded.toLocaleString()} folded
+            {totals.errors > 0 ? ` · ${plural(totals.errors, 'error')}` : ''} across {plural(cycles.length, 'run')}
+          </PlotSource>
+        </div>
+      ) : null}
 
       {cycles.map((cycle) => {
         const held = cycle.status === 'PENDING_APPROVAL';
