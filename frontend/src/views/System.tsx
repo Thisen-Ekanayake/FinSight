@@ -16,16 +16,19 @@
 //   now, and the Desk carries the only status worth interrupting anyone for.
 // ═══════════════════════════════════════════════════════
 
+import { useMemo } from 'react';
 import * as api from '../api/client';
-import type { Budget } from '../api/types';
+import type { Budget, RunSummary } from '../api/types';
 import { useResource } from '../hooks/useResource';
-import { ErrorNote, Kicker, Loading, Meter, PageHead } from '../components/primitives';
-import { clock, percent } from '../lib/format';
+import { Empty, ErrorNote, Kicker, Loading, Meter, PageHead } from '../components/primitives';
+import { clock, percent, plural, seconds } from '../lib/format';
+import { BarChart, FunnelBars, LineChart, PlotSource } from '../viz/plot';
 
 export function System() {
   const health = useResource(() => api.health(), [], { pollMs: 30_000 });
   const budgets = useResource(() => api.budgets(), [], { pollMs: 60_000 });
   const config = useResource(() => api.config(), []);
+  const runs = useResource(() => api.listRuns(25), [], { pollMs: 60_000 });
 
   const services = health.data
     ? [
@@ -90,6 +93,10 @@ export function System() {
         </>
       ) : null}
 
+      <Kicker style={{ margin: '52px 0 6px' }}>Answer quality, recent runs</Kicker>
+      <ErrorNote error={runs.error} />
+      <RunQuality runs={runs.data ?? []} loading={runs.loading} />
+
       <Kicker style={{ margin: '52px 0 6px' }}>Today's allowances</Kicker>
       <ErrorNote error={budgets.error} />
       {(budgets.data ?? []).length === 0 && !budgets.loading ? (
@@ -139,6 +146,89 @@ export function System() {
         </>
       ) : null}
     </main>
+  );
+}
+
+/**
+ * How many runs the charts show.
+ *
+ * The endpoint returns 25. Twelve is what fits across 720 units of viewBox
+ * with a legible timestamp under each column — past that the axis turns into
+ * a grey smear and stops being readable, which defeats the point of drawing
+ * it. The remainder still counts toward the summary below.
+ */
+const CHARTED_RUNS = 12;
+
+/**
+ * Citation coverage and latency across recent answers.
+ *
+ * ══ WHY THIS EARNS A PLACE ON A STATUS PAGE ══
+ *   This page exists for "an answer looked thin". Coverage is the number that
+ *   says so directly: the share of the answer's figures traceable to a value a
+ *   tool actually returned. One run at 78% is invisible in a list of prose,
+ *   and obvious as a short bar next to eleven full ones.
+ *
+ * ══ COVERAGE IS DRAWN FROM ZERO, ON PURPOSE ══
+ *   Auto-scaling the axis to 0.9–1.0 would magnify the difference between a
+ *   fine run and a very slightly less fine one into a cliff, and would put
+ *   ticks above 100% on a bounded quantity. Bars from zero keep 92% looking
+ *   like what it is.
+ */
+function RunQuality({ runs, loading }: { runs: RunSummary[]; loading: boolean }) {
+  // The API returns newest first; time reads left to right on an axis.
+  const charted = useMemo(() => [...runs].reverse().slice(-CHARTED_RUNS), [runs]);
+
+  if (loading && runs.length === 0) return <Loading />;
+
+  if (runs.length === 0) {
+    return (
+      <Empty headline="No answers yet">
+        Ask something on the Ask page and its coverage and latency will be charted here. This is where a run that came
+        back thin shows up as a short bar rather than a sentence you have to notice.
+      </Empty>
+    );
+  }
+
+  const flagged = runs.filter((r) => !r.verification_passed).length;
+  const repaired = runs.filter((r) => r.repair_count > 0).length;
+
+  return (
+    <div style={{ paddingTop: 16 }}>
+      <BarChart
+        points={charted.map((run) => ({ label: clock(run.created_at), value: run.citation_coverage }))}
+        format={(v) => percent(v)}
+        title="Citation coverage per run"
+        height={200}
+      />
+      <PlotSource>
+        claims traced to a returned value · {plural(charted.length, 'run')} shown
+        {runs.length > charted.length ? ` of ${runs.length}` : ''}
+      </PlotSource>
+
+      <div style={{ height: 30 }} />
+
+      <LineChart
+        series={[{ name: 'latency', points: charted.map((run) => ({ label: clock(run.created_at), value: run.latency_ms })) }]}
+        format={(v) => seconds(v)}
+        title="Latency per run"
+        height={200}
+      />
+      <PlotSource>end to end, routing through verification</PlotSource>
+
+      <div style={{ height: 30 }} />
+
+      {/* Counted over everything the endpoint returned, not just the charted
+          window — a summary that silently described twelve runs while sitting
+          under a heading about recent ones would be quietly wrong. */}
+      <FunnelBars
+        rows={[
+          { label: 'verified', value: runs.length - flagged },
+          { label: 'flagged', value: flagged, tone: flagged > 0 ? 'var(--alert)' : undefined },
+          { label: 'needed a repair pass', value: repaired },
+        ]}
+      />
+      <PlotSource>across the last {plural(runs.length, 'run')}</PlotSource>
+    </div>
   );
 }
 
