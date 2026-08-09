@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api.research_routes import _series
 from src.persistence import db as db_module
 
 
@@ -761,3 +762,102 @@ class TestMonitorRoutes:
 
         assert response.status_code == 500
         assert "checkpoint db locked" in response.json()["detail"]
+
+
+class TestSeriesExtraction:
+    """
+    The chartable projection of a run's findings.
+
+    Its whole job is refusing things: the aggregator's metric keys, qualitative
+    findings, failed branches, and readings that belong to no reporting period
+    all have to stay off an axis. src/viz/ambient.ts states the rule this
+    enforces — a surface that appears to plot something it cannot is worse than
+    no surface.
+    """
+
+    @staticmethod
+    def _raw(**overrides):
+        base = {
+            "agent": "fundamentals",
+            "ticker": "AAPL",
+            "claim": "AAPL reported gross margin of 46.2 percent for FY2025",
+            "metric": "gross_margin@FY2025",
+            "period": "FY2025",
+            "value": 46.2,
+            "unit": "percent",
+            "citations": [{"source_type": "EDGAR", "source_id": "0000320193-25-000079"}],
+            "confidence": 1.0,
+            "error": None,
+        }
+        return {**base, **overrides}
+
+    def test_a_numeric_finding_becomes_a_point(self):
+        (point,) = _series([self._raw()])
+
+        assert point.ticker == "AAPL"
+        assert point.metric == "gross_margin"
+        assert point.period == "FY2025"
+        assert point.value == 46.2
+        assert point.unit == "percent"
+        assert point.provider == "EDGAR"
+
+    def test_the_aggregator_key_never_leaks_into_the_metric_name(self):
+        """'gross_margin@FY2025' is the aggregator's composite key, not a label."""
+        (point,) = _series([self._raw()])
+        assert "@" not in point.metric
+
+    def test_an_old_checkpoint_without_a_period_falls_back_to_the_key(self):
+        """
+        period was added to AgentFinding after runs were already on disk.
+        Replaying one of those must still chart rather than silently vanish.
+        """
+        (point,) = _series([self._raw(period=None)])
+        assert point.period == "FY2025"
+
+    def test_an_explicit_period_wins_over_the_suffix(self):
+        (point,) = _series([self._raw(metric="gross_margin@STALE", period="FY2025")])
+        assert point.period == "FY2025"
+
+    def test_a_qualitative_finding_is_dropped(self):
+        assert _series([self._raw(value="strong margin expansion")]) == []
+
+    def test_a_boolean_is_dropped_rather_than_plotted_as_one(self):
+        """bool is an int in Python — left alone this would chart as a 0/1 spike."""
+        assert _series([self._raw(value=True)]) == []
+
+    def test_a_finding_with_no_value_is_dropped(self):
+        assert _series([self._raw(value=None)]) == []
+
+    def test_a_failed_finding_is_dropped(self):
+        assert _series([self._raw(error="EDGAR returned 403")]) == []
+
+    def test_a_reading_belonging_to_no_period_is_dropped(self):
+        """technical and macro report a current reading — there is no axis to put it on."""
+        assert _series([self._raw(agent="technical", metric="rsi", period=None)]) == []
+
+    def test_a_finding_with_no_ticker_is_dropped(self):
+        assert _series([self._raw(ticker=None)]) == []
+
+    def test_points_are_sorted_for_a_stable_response(self):
+        findings = [
+            self._raw(metric="gross_margin@FY2025", period="FY2025", value=46.2),
+            self._raw(metric="gross_margin@FY2023", period="FY2023", value=44.1),
+            self._raw(ticker="MSFT", metric="gross_margin@FY2024", period="FY2024", value=69.8),
+            self._raw(metric="gross_margin@FY2024", period="FY2024", value=45.9),
+        ]
+
+        points = _series(findings)
+
+        assert [(p.ticker, p.period) for p in points] == [
+            ("AAPL", "FY2023"),
+            ("AAPL", "FY2024"),
+            ("AAPL", "FY2025"),
+            ("MSFT", "FY2024"),
+        ]
+
+    def test_a_run_with_no_findings_yields_no_points(self):
+        assert _series([]) == []
+
+    def test_the_query_response_carries_the_series(self, client):
+        body = client.post("/research/query", json={"query": "Apple gross margin?"}).json()
+        assert "series" in body

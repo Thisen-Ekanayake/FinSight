@@ -36,6 +36,7 @@ def finding(
     *,
     ticker: str | None = None,
     metric: str | None = None,
+    period: str | None = None,
     value: float | str | None = None,
     unit: str | None = None,
     citations: list[Citation] | None = None,
@@ -47,12 +48,17 @@ def finding(
     ``value`` is what the citation verifier matches numbers in the final
     answer against, so it must be the raw figure the tool returned — not a
     formatted or rounded string.
+
+    ``period`` is optional and only meaningful for findings that belong to a
+    reporting period. Setting it is what makes a finding chartable as a
+    series; leaving it None says "this is a reading, not a filed period".
     """
     return AgentFinding(
         agent=agent,
         ticker=ticker,
         claim=claim,
         metric=metric,
+        period=period,
         value=value,
         unit=unit,
         citations=citations or [],

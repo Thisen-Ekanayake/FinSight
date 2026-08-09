@@ -52,6 +52,7 @@ def _finding(
         ticker=ticker,
         claim=claim,
         metric=metric,
+        period=None,
         value=value,
         unit=unit,
         citations=citations if citations is not None else [_citation()],

@@ -54,6 +54,7 @@ def _finding(claim: str, *, value: float | None = None, metric: str = "revenue@2
         ticker="AAPL",
         claim=claim,
         metric=metric,
+        period=None,
         value=value,
         unit="USD",
         citations=[_citation()],

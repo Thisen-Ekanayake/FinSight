@@ -72,6 +72,15 @@ class AgentFinding(TypedDict):
     ticker: str | None
     claim: str
     metric: str | None
+    # The reporting period this value belongs to, e.g. "FY2025". Carried
+    # separately from ``metric`` because the aggregator needs metric keys that
+    # already encode the period (see fundamentals.py) while a chart needs the
+    # period back as its own axis. Parsing it out of the key would make the
+    # key's format load-bearing for two unrelated callers.
+    #
+    # None for agents whose findings are not a time series — technical and
+    # macro report a current reading, not a filed period.
+    period: str | None
     value: float | str | None
     unit: str | None
     citations: list[Citation]

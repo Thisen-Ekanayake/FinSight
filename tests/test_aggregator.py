@@ -43,6 +43,7 @@ def _finding(
         ticker=ticker,
         claim=f"{ticker} {metric} is {value}",
         metric=metric,
+        period=None,
         value=value,
         unit="USD",
         citations=[_citation(source)],

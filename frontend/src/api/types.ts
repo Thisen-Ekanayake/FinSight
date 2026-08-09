@@ -67,6 +67,24 @@ export interface ToolCall {
   ok: boolean;
 }
 
+/**
+ * One numeric finding, shaped for plotting.
+ *
+ * `provider` travels with every point because the fundamentals chain falls
+ * through EDGAR -> yfinance -> FMP: two points on the same line can have
+ * different provenance, and a chart that hid that would imply a uniformity the
+ * data does not have.
+ */
+export interface SeriesPoint {
+  ticker: string;
+  metric: string;
+  period: string;
+  value: number;
+  unit: string | null;
+  provider: string | null;
+  confidence: number;
+}
+
 /** A completed research run. */
 export interface QueryResponse {
   thread_id: string;
@@ -81,6 +99,8 @@ export interface QueryResponse {
   repair_count: number;
   errors: string[];
   latency_ms: number;
+  /** Empty for questions that produce no numeric time series — most non-fundamentals ones. */
+  series: SeriesPoint[];
 }
 
 /**

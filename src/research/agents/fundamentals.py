@@ -166,6 +166,9 @@ def fundamentals_node(payload: dict, ticker: str) -> tuple[list, list, list]:
                     # Metric key includes the period, so the aggregator does
                     # not mistake two different years for a source conflict.
                     metric=f"{name}@{record['period']}",
+                    # Same period again, unpacked. The composite key above is
+                    # the aggregator's; this is the one a chart plots on.
+                    period=record["period"],
                     # Raw figure, not a formatted string — the citation verifier
                     # matches numbers in the answer against exactly this.
                     value=record["value"],

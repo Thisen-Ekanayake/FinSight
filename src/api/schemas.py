@@ -97,6 +97,26 @@ class ToolCallOut(BaseModel):
     ok: bool
 
 
+class SeriesPointOut(BaseModel):
+    """
+    One numeric finding, shaped for plotting.
+
+    ``provider`` travels with every point on purpose. The fundamentals chain
+    falls through EDGAR -> yfinance -> FMP, so two points on one line can have
+    different provenance, and a chart that hid that would imply a uniformity
+    the data does not have. The UI labels the source rather than drawing a
+    line as if every point were filed.
+    """
+
+    ticker: str
+    metric: str
+    period: str
+    value: float
+    unit: str | None = None
+    provider: str | None = None
+    confidence: float = 1.0
+
+
 # ── Responses ───────────────────────────────────────────
 class QueryResponse(BaseModel):
     """A completed research run."""
@@ -113,6 +133,9 @@ class QueryResponse(BaseModel):
     repair_count: int
     errors: list[str]
     latency_ms: int
+    # Chartable subset of the run's findings. Empty for questions that produce
+    # no numeric time series, which is most non-fundamentals questions.
+    series: list[SeriesPointOut] = []
 
 
 class ThreadStep(BaseModel):

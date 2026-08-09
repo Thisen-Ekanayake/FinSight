@@ -34,6 +34,7 @@ from src.api.schemas import (
     QueryRequest,
     QueryResponse,
     RunSummaryOut,
+    SeriesPointOut,
     ThreadResponse,
     ThreadStep,
     ToolCallOut,
@@ -117,6 +118,63 @@ def _unique_citations(citations: list[dict[str, Any]]) -> list[CitationOut]:
     return out
 
 
+def _series(findings: list[dict[str, Any]]) -> list[SeriesPointOut]:
+    """
+    Pull the chartable points out of a run's findings.
+
+    A finding qualifies only if it has a ticker, a genuinely numeric value, and
+    a reporting period. Everything else is dropped rather than coerced —
+    plotting a qualitative finding by forcing it onto an axis is precisely what
+    src/viz/ambient.ts refuses to do, and the same rule applies here.
+
+    ``period`` is a recent addition to AgentFinding, so findings replayed from
+    a checkpoint written before it have no such key. The metric name has
+    carried the period as a "name@period" suffix all along, so that is the
+    fallback. It is read only — nothing here writes that format back, and the
+    aggregator's key stays the aggregator's business.
+    """
+    points: list[SeriesPointOut] = []
+
+    for item in findings:
+        if item.get("error"):
+            continue
+
+        value = item.get("value")
+        # bool is an int in Python. Left alone it would plot as a silent 0/1.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+
+        ticker = item.get("ticker")
+        metric_key = item.get("metric")
+        if not ticker or not metric_key:
+            continue
+
+        # "gross_margin@FY2025" -> ("gross_margin", "FY2025"). An explicit
+        # period wins; the suffix is only consulted when there is none.
+        name, _, suffix = metric_key.partition("@")
+        period = item.get("period") or suffix
+        if not period:
+            continue
+
+        citations = item.get("citations") or []
+        points.append(
+            SeriesPointOut(
+                ticker=ticker,
+                metric=name,
+                period=period,
+                value=float(value),
+                unit=item.get("unit"),
+                provider=citations[0].get("source_type") if citations else None,
+                confidence=float(item.get("confidence", 1.0)),
+            )
+        )
+
+    # Sorted so a line renders in period order without the client re-deriving
+    # it, and so two identical runs produce byte-identical responses.
+    points.sort(key=lambda p: (p.ticker, p.metric, p.period))
+    return points
+
+
 def _to_response(state: dict[str, Any], *, thread_id: str, latency_ms: int) -> QueryResponse:
     """Translate a final ResearchState into the API's response shape."""
     plan = state.get("plan") or {}
@@ -135,6 +193,7 @@ def _to_response(state: dict[str, Any], *, thread_id: str, latency_ms: int) -> Q
         repair_count=state.get("repair_count", 0),
         errors=list(state.get("errors", [])),
         latency_ms=latency_ms,
+        series=_series(state.get("findings", [])),
     )
 
 
