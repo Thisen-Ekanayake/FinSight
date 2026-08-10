@@ -26,7 +26,18 @@
 import type { ReactNode } from 'react';
 import type { Citation, UnsupportedClaim } from '../api/types';
 
-const MARKER_RE = /\[SRC:([A-Z_]+):([^\]]+)\]/g;
+/**
+ * The two things stripped out of the prose: a citation marker, and the `**`
+ * the synthesis prompt uses to label a figure ("**Fiscal Year 2025:**").
+ *
+ * Deliberately not a markdown parser — see renderAnswer's note. `**` is the
+ * one delimiter the prompt actually produces, it cannot occur inside a dollar
+ * figure, and it is doubled, so it cannot collide with the `*` that starts a
+ * bullet. Underscores are pointedly NOT emphasis here: metric names arrive as
+ * gross_margin and net_income, and italicising half of one would be a
+ * renderer inventing formatting out of data.
+ */
+const MARKER_RE = /\[SRC:([A-Z_]+):([^\]]+)\]|\*\*/g;
 
 /** `TYPE:ID` -> its 1-based position in the source list. */
 export function citationIndex(citations: Citation[]): Map<string, number> {
@@ -45,20 +56,33 @@ interface Marker {
 }
 
 /** Strip the inline markers out of one block, remembering where they were. */
-function extract(block: string): { text: string; markers: Marker[] } {
+function extract(block: string): { text: string; markers: Marker[]; bolds: [number, number][] } {
   let text = '';
   const markers: Marker[] = [];
+  const bolds: [number, number][] = [];
   let last = 0;
+  let boldFrom = -1;
 
   MARKER_RE.lastIndex = 0;
   for (let match = MARKER_RE.exec(block); match !== null; match = MARKER_RE.exec(block)) {
     text += block.slice(last, match.index);
-    markers.push({ at: text.length, key: `${match[1]}:${match[2]}`.toUpperCase() });
     last = match.index + match[0].length;
+
+    if (match[1] !== undefined) {
+      markers.push({ at: text.length, key: `${match[1]}:${match[2]}`.toUpperCase() });
+    } else if (boldFrom === -1) {
+      boldFrom = text.length;
+    } else {
+      bolds.push([boldFrom, text.length]);
+      boldFrom = -1;
+    }
   }
   text += block.slice(last);
 
-  return { text, markers };
+  // An unclosed `**` is a model artefact rather than emphasis. The delimiter
+  // is already gone from `text`; dropping the range with it means the prose
+  // reads normally instead of turning bold to the end of the paragraph.
+  return { text, markers, bolds };
 }
 
 /**
@@ -105,26 +129,55 @@ function locate(text: string, claim: string): [number, number][] {
 type Event =
   | { at: number; kind: 'cite'; key: string }
   | { at: number; kind: 'open' }
-  | { at: number; kind: 'close' };
+  | { at: number; kind: 'close' }
+  | { at: number; kind: 'bold-open' }
+  | { at: number; kind: 'bold-close' };
+
+/**
+ * Order of events landing on the same offset.
+ *
+ * Everything closes before anything opens, and a citation superscript sits
+ * outside the emphasis it follows — "**FY2025:**[SRC:...]" should render the
+ * reference after the bold run, not inside it.
+ */
+const RANK: Record<Event['kind'], number> = {
+  close: 0,
+  'bold-close': 1,
+  cite: 2,
+  'bold-open': 3,
+  open: 4,
+};
 
 /**
  * Render one paragraph: prose, superscript references, and highlighted spans
  * for anything the verifier could not ground.
  */
 function renderBlock(block: string, index: Map<string, number>, claims: string[], keyPrefix: string): ReactNode[] {
-  const { text, markers } = extract(block);
+  const { text, markers, bolds } = extract(block);
 
   const spans = claims.flatMap((claim) => locate(text, claim));
   const events: Event[] = [
     ...markers.map((m): Event => ({ at: m.at, kind: 'cite', key: m.key })),
     ...spans.map(([start]): Event => ({ at: start, kind: 'open' })),
     ...spans.map(([, end]): Event => ({ at: end, kind: 'close' })),
-  ].sort((a, b) => a.at - b.at || (a.kind === 'close' ? -1 : 1));
+    ...bolds.map(([start]): Event => ({ at: start, kind: 'bold-open' })),
+    ...bolds.map(([, end]): Event => ({ at: end, kind: 'bold-close' })),
+  ].sort((a, b) => a.at - b.at || RANK[a.kind] - RANK[b.kind]);
 
   const out: ReactNode[] = [];
   let cursor = 0;
   let open = false;
+  let bold = false;
+  let seq = 0;
   let buffer: ReactNode[] = [];
+
+  // Emphasis wraps the text slice rather than switching the flush wrapper, so
+  // it composes with a highlight instead of fighting it: a flagged claim that
+  // happens to contain a bold label still renders as one <mark>.
+  const pushText = (slice: string) => {
+    if (!slice) return;
+    buffer.push(bold ? <strong key={`${keyPrefix}-s${seq++}`}>{slice}</strong> : slice);
+  };
 
   const flush = () => {
     if (buffer.length === 0) return;
@@ -150,10 +203,14 @@ function renderBlock(block: string, index: Map<string, number>, claims: string[]
 
   for (const event of events) {
     if (event.at > cursor) {
-      buffer.push(text.slice(cursor, event.at));
+      pushText(text.slice(cursor, event.at));
       cursor = event.at;
     }
-    if (event.kind === 'cite') {
+    if (event.kind === 'bold-open') {
+      bold = true;
+    } else if (event.kind === 'bold-close') {
+      bold = false;
+    } else if (event.kind === 'cite') {
       const n = index.get(event.key);
       buffer.push(
         <sup
@@ -174,7 +231,7 @@ function renderBlock(block: string, index: Map<string, number>, claims: string[]
     }
   }
 
-  if (cursor < text.length) buffer.push(text.slice(cursor));
+  if (cursor < text.length) pushText(text.slice(cursor));
   flush();
   return out;
 }
@@ -187,11 +244,15 @@ export interface AnswerBlock {
 /**
  * Split the answer into blocks and render each.
  *
- * The synthesis prompt produces paragraphs separated by blank lines and
- * markdown-ish `*   ` bullets. Nothing more elaborate is parsed: an answer is
- * prose with references, and running it through a full markdown pipeline
- * would invite the renderer to interpret a dollar figure or an underscore in
- * a ticker as formatting.
+ * The synthesis prompt produces paragraphs separated by blank lines,
+ * markdown-ish `*   ` bullets, and `**` around the label it puts in front of
+ * a figure. Those three, and nothing else: an answer is prose with
+ * references, and a full markdown pipeline would invite the renderer to read
+ * a dollar figure or the underscore in gross_margin as formatting.
+ *
+ * `**` is handled rather than left as literal asterisks because the model
+ * emits it on essentially every multi-period answer, and unrendered
+ * delimiters in the middle of financial prose read as a broken product.
  */
 export function renderAnswer(
   answer: string,
