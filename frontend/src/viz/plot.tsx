@@ -34,7 +34,11 @@ import type { ReactNode } from 'react';
 // chart instead of needing a resize observer.
 const W = 720;
 
-const PAD = { top: 16, right: 18, bottom: 34, left: 54 };
+// Right and left have to clear a whole tick label, not just the plot line:
+// both outer x labels are centre-anchored on the axis ends, and the y labels
+// are right-anchored 8 units outside it. Too little here and "2025 FY" loses
+// its last character off the edge of the viewBox.
+const PAD = { top: 16, right: 34, bottom: 34, left: 62 };
 
 /** Series are told apart by all three of these at once, never by hue alone. */
 const STROKES = ['var(--color-accent-700)', 'var(--alert)', 'var(--color-accent-400)', 'var(--ink-58)'];
@@ -132,13 +136,19 @@ function Frame({
   const step = labels.length > 1 ? plotW / (labels.length - 1) : 0;
 
   return (
+    // width/height are the INTRINSIC size, in the viewBox's own units, and the
+    // CSS below scales it to the container. height="auto" is not a valid SVG
+    // attribute value: the element ends up with no layout height, and with
+    // overflow visible the chart then paints outside its own box and over
+    // whatever follows it. Giving real dimensions and letting CSS do the
+    // scaling is what makes the aspect ratio resolve.
     <svg
       viewBox={`0 0 ${W} ${height}`}
-      width="100%"
-      height="auto"
+      width={W}
+      height={height}
       role="img"
       aria-label={title}
-      style={{ display: 'block', overflow: 'visible' }}
+      style={{ display: 'block', width: '100%', height: 'auto' }}
     >
       <title>{title}</title>
 
