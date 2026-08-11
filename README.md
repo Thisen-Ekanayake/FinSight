@@ -63,9 +63,9 @@ A HIGH alert checkpoints the run to disk and returns control immediately;
 a later `Command(resume=decisions)` call resumes the exact same run:
 
 ```bash
-./run_monitor.sh --once                                    # may pause: exit code 2
-./run_monitor.sh --pending                                 # what's waiting, and on what
-./run_monitor.sh --resume <cycle_id> --approve <id> --reject <id>
+./shell_scripts/run_monitor.sh --once                                    # may pause: exit code 2
+./shell_scripts/run_monitor.sh --pending                                 # what's waiting, and on what
+./shell_scripts/run_monitor.sh --resume <cycle_id> --approve <id> --reject <id>
 ```
 
 ---
@@ -119,16 +119,16 @@ make test                     # unit tests (no network, no LLM spend)
 **Ask it something:**
 
 ```bash
-./run_ingest.sh
-./run_research.sh "How did Apple's gross margin trend over the last three fiscal years?"
-./run_api.sh    # then open localhost:8000/docs
+./shell_scripts/run_ingest.sh
+./shell_scripts/run_research.sh "How did Apple's gross margin trend over the last three fiscal years?"
+./shell_scripts/run_api.sh    # then open localhost:8000/docs
 ```
 
 **Look at it:**
 
 ```bash
-./run_api.sh    # backend first
-./run_web.sh    # then localhost:5173
+./shell_scripts/run_api.sh    # backend first
+./shell_scripts/run_web.sh    # then localhost:5173
 ```
 
 Or run the whole stack — Qdrant, API, dashboard — in one command:
@@ -142,9 +142,9 @@ See [`docs/deploy.md`](./docs/deploy.md) for putting the stack on a host with a 
 **Watch something:**
 
 ```bash
-./run_monitor.sh --once --warmup    # first run: index candidates, report nothing
-./run_monitor.sh --once             # a real cycle
-./run_monitor.sh --pending          # cycles paused awaiting a decision
+./shell_scripts/run_monitor.sh --once --warmup    # first run: index candidates, report nothing
+./shell_scripts/run_monitor.sh --once             # a real cycle
+./shell_scripts/run_monitor.sh --pending          # cycles paused awaiting a decision
 ```
 
 **Measure it:**
@@ -177,7 +177,7 @@ plain HTTP and holds no state of its own.
 | **Watchlist** | What's being watched, and what's still cold |
 | **System** | What's configured, and what quota remains |
 
-The original Streamlit dashboard remains in [`src/ui/`](src/ui/) as a reference implementation (`./run_ui.sh`, or `docker compose --profile legacy up -d ui`).
+The original Streamlit dashboard remains in [`src/ui/`](src/ui/) as a reference implementation (`./shell_scripts/run_ui.sh`, or `docker compose --profile legacy up -d ui`).
 
 ---
 

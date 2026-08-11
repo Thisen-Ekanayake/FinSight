@@ -9,7 +9,7 @@ npm install
 npm run dev        # localhost:5173, proxies /api -> localhost:8000
 ```
 
-Or from the repo root: `./run_web.sh` (starts the dev server and warns if the
+Or from the repo root: `./shell_scripts/run_web.sh` (starts the dev server and warns if the
 API is not up), `make web-build` (type-check + bundle), `make web-check`
 (types only).
 

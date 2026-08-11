@@ -7,13 +7,13 @@
 # parallel, and returns a grounded answer with citations.
 #
 # Usage:
-#   ./run_research.sh "How did Apple's gross margin trend?"
-#   ./run_research.sh --audit "Compare AAPL and MSFT revenue"
-#   ./run_research.sh --plan-only "What is the Fed funds rate?"
+#   ./shell_scripts/run_research.sh "How did Apple's gross margin trend?"
+#   ./shell_scripts/run_research.sh --audit "Compare AAPL and MSFT revenue"
+#   ./shell_scripts/run_research.sh --plan-only "What is the Fed funds rate?"
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [[ ! -x .venv/bin/python ]]; then
     echo "No .venv found. Run: make venv && make install" >&2
@@ -26,7 +26,7 @@ if [[ ! -f .env ]]; then
 fi
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: ./run_research.sh [--audit] [--plan-only] \"your question\"" >&2
+    echo "Usage: ./shell_scripts/run_research.sh [--audit] [--plan-only] \"your question\"" >&2
     exit 1
 fi
 

@@ -43,10 +43,10 @@
 #   reaches a reader. See src/persistence/checkpointer.py.
 #
 # Usage:
-#   ./run_monitor.sh --once --warmup
-#   ./run_monitor.sh --once
-#   ./run_monitor.sh --pending
-#   ./run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
+#   ./shell_scripts/run_monitor.sh --once --warmup
+#   ./shell_scripts/run_monitor.sh --once
+#   ./shell_scripts/run_monitor.sh --pending
+#   ./shell_scripts/run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -617,7 +617,9 @@ def cycle_report(state: MonitorState) -> str:
             lines.append(f"        {alert['detail'][:110]}")
             lines.append(f"        alert_id: {alert['alert_id']}")
         lines.append("")
-        lines.append(f"  Resolve with: ./run_monitor.sh --resume {cycle_id} --approve <id>  (repeatable, or --reject)")
+        lines.append(
+            f"  Resolve with: ./shell_scripts/run_monitor.sh --resume {cycle_id} --approve <id>  (repeatable, or --reject)"
+        )
         lines.append("")
         return "\n".join(lines)
 

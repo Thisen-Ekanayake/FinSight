@@ -6,12 +6,12 @@
 # Starts the FastAPI app. Interactive docs at http://localhost:8000/docs
 #
 # Usage:
-#   ./run_api.sh              # with autoreload
-#   ./run_api.sh --no-reload  # as it runs in a container
+#   ./shell_scripts/run_api.sh              # with autoreload
+#   ./shell_scripts/run_api.sh --no-reload  # as it runs in a container
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [[ ! -x .venv/bin/python ]]; then
     echo "No .venv found. Run: make venv && make install" >&2

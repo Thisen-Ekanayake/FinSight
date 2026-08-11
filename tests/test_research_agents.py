@@ -302,7 +302,7 @@ class TestSpecialistsAgainstLiveData:
     def test_filings_rag_returns_cited_narrative(self):
         result = AGENT_NODES["filings_rag"]({"ticker": "AAPL", "sub_question": "what supply chain risks were flagged?"})
         if not result["findings"]:
-            pytest.skip("no filings ingested; run ./run_ingest.sh")
+            pytest.skip("no filings ingested; run ./shell_scripts/run_ingest.sh")
         assert all(f["citations"][0]["source_id"] for f in result["findings"])
 
     def test_macro_ignores_the_ticker(self):

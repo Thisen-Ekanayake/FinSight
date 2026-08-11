@@ -270,7 +270,7 @@ EMAIL_SMTP_PORT: int = int(os.getenv("EMAIL_SMTP_PORT", "465"))
 # ── Scheduler (Phase 7) ─────────────────────────────────
 # Off by default so `make api` does not silently start hitting EDGAR,
 # Finnhub, and yfinance on a timer the first time someone runs the server.
-# Enable once the watchlist has been warmed up — see run_monitor.sh --once
+# Enable once the watchlist has been warmed up — see shell_scripts/run_monitor.sh --once
 # --warmup — and see src/monitor/scheduler.py for why it runs cadence off
 # MONITOR_CADENCE_HOURS inside the API process rather than a separate cron.
 MONITOR_SCHEDULER_ENABLED: bool = os.getenv("MONITOR_SCHEDULER_ENABLED", "false").lower() in {"1", "true", "yes"}

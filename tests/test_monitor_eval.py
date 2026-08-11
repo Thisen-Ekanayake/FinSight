@@ -4,7 +4,7 @@
 #
 # The sweep MATH is tested here with injected scores — fast, deterministic,
 # no embedder. score_pairs() itself (real bge-small) is exercised by actually
-# running `./run_evals.sh alerts`, not by a unit test, the same split
+# running `./shell_scripts/run_evals.sh alerts`, not by a unit test, the same split
 # test_dedup.py / test_dedup_live.py already draws for the algorithm it
 # feeds.
 # ═══════════════════════════════════════════════════════

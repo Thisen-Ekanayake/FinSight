@@ -6,13 +6,13 @@
 # Watch the ticker list, deduplicate what it finds, and report what is new.
 #
 # Usage:
-#   ./run_monitor.sh --once --warmup      # FIRST RUN: index, report nothing
-#   ./run_monitor.sh --once               # a real cycle
-#   ./run_monitor.sh --watchlist          # show it
-#   ./run_monitor.sh --add TSLA
-#   ./run_monitor.sh --decisions          # why things were suppressed
-#   ./run_monitor.sh --pending            # cycles paused awaiting a HIGH-alert decision
-#   ./run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
+#   ./shell_scripts/run_monitor.sh --once --warmup      # FIRST RUN: index, report nothing
+#   ./shell_scripts/run_monitor.sh --once               # a real cycle
+#   ./shell_scripts/run_monitor.sh --watchlist          # show it
+#   ./shell_scripts/run_monitor.sh --add TSLA
+#   ./shell_scripts/run_monitor.sh --decisions          # why things were suppressed
+#   ./shell_scripts/run_monitor.sh --pending            # cycles paused awaiting a HIGH-alert decision
+#   ./shell_scripts/run_monitor.sh --resume <cycle_id> --approve <alert_id> --reject <alert_id>
 #
 # Run --warmup once before the first real cycle. A cold dedup index has nothing
 # to match against, so cycle 1 would otherwise report every open filing, every
@@ -23,7 +23,7 @@
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [[ ! -x .venv/bin/python ]]; then
     echo "No .venv found. Run: make venv && make install" >&2
