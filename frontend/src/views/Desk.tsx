@@ -209,7 +209,7 @@ export function Desk({
           {hasPending ? 'Everything else went out on its own: ' : ''}
           {worked.reported} reported, {worked.folded} retellings folded away over {plural(worked.runs, 'run')}.{' '}
           <a
-            href="#findings"
+            href="/findings"
             onClick={(e) => {
               e.preventDefault();
               navigate('findings');
