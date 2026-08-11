@@ -24,12 +24,17 @@ export function Header({
   pendingCount,
   theme,
   setTheme,
+  email,
+  onSignOut,
 }: {
   view: View;
   navigate: (view: View) => void;
   pendingCount: number;
   theme: ThemeSetting;
   setTheme: (theme: ThemeSetting) => void;
+  /** The signed-in address. Empty when auth is off — then nothing is shown. */
+  email?: string;
+  onSignOut?: () => void;
 }) {
   return (
     <header
@@ -91,7 +96,42 @@ export function Header({
         })}
       </nav>
 
-      <div className="seg" style={{ flex: 'none', marginLeft: 'auto' }} role="radiogroup" aria-label="Theme">
+      {/* Who is signed in, shown because that is the point of signing in: an
+          approval on the Desk is recorded against this address. Absent
+          entirely when auth is off, rather than showing a placeholder
+          identity that would imply attribution nobody is doing. */}
+      {email ? (
+        <div
+          className="mono"
+          style={{ flex: 'none', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, fontSize: 11.5 }}
+        >
+          <span style={{ color: 'var(--ink-45)' }} title={email}>
+            {email}
+          </span>
+          <button
+            type="button"
+            onClick={onSignOut}
+            style={{
+              fontFamily: 'inherit',
+              fontSize: 11.5,
+              background: 'transparent',
+              border: '1px solid var(--color-divider)',
+              padding: '4px 9px',
+              cursor: 'pointer',
+              color: 'var(--ink-70)',
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      ) : null}
+
+      <div
+        className="seg"
+        style={{ flex: 'none', marginLeft: email ? undefined : 'auto' }}
+        role="radiogroup"
+        aria-label="Theme"
+      >
         {(['light', 'auto', 'dark'] as ThemeSetting[]).map((option) => (
           <label key={option} className="seg-opt" style={{ padding: '5px 9px', fontSize: 11 }}>
             <input
