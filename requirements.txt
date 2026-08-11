@@ -26,6 +26,12 @@ langsmith==0.10.15
 # ChatGoogleGenerativeAI, and installing it drags in google-cloud-aiplatform.
 langchain-google-genai==4.3.2
 
+# Reaches us transitively through the SDK above, but src/api/auth.py imports it
+# DIRECTLY to verify Google ID tokens — so it is pinned here in its own right.
+# Left implicit, a future langchain-google-genai bump could drop or narrow the
+# dependency and take sign-in down with it.
+google-auth==2.56.2
+
 # ── Vector store & embeddings ─────────────────────
 # qdrant-client must track the pinned server (v1.17.1). fastembed's ONNX model
 # registry moves, and changing the embedding model invalidates every tuned
