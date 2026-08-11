@@ -6,9 +6,16 @@
 #           how much of each free tier is left today.
 #
 # Routes:
-#   GET /health          liveness and per-dependency status
+#   GET /health          liveness and per-dependency status        (PUBLIC)
 #   GET /admin/budgets   today's API usage against each daily allowance
 #   GET /admin/config    effective configuration, secrets excluded
+#
+# ══ /health IS PUBLIC AND MUST STAY THAT WAY ══
+#   docker-compose.yml probes it to decide service_healthy, and the web
+#   container's depends_on waits on that. Putting it behind require_user makes
+#   the api container permanently unhealthy and the frontend never starts.
+#   This is why the two /admin routes carry their own Depends rather than the
+#   router taking a blanket one in create_app().
 #
 # ══ /config NEVER RETURNS A SECRET ══
 #   An endpoint whose job is to report configuration is the single easiest
@@ -25,9 +32,10 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 
+from src.api.auth import require_user
 from src.api.schemas import BudgetOut, ConfigOut, HealthResponse
 from src.core import config as core_config
 from src.core.tracing import is_tracing_enabled
@@ -130,7 +138,12 @@ async def health(request: Request) -> HealthResponse:
     )
 
 
-@router.get("/admin/budgets", response_model=list[BudgetOut], summary="Today's API usage")
+@router.get(
+    "/admin/budgets",
+    response_model=list[BudgetOut],
+    summary="Today's API usage",
+    dependencies=[Depends(require_user)],
+)
 async def budgets() -> list[BudgetOut]:
     """
     Report each provider's usage against its daily allowance.
@@ -142,7 +155,12 @@ async def budgets() -> list[BudgetOut]:
     return [BudgetOut(**status) for status in get_budget_status()]
 
 
-@router.get("/admin/config", response_model=ConfigOut, summary="Effective configuration")
+@router.get(
+    "/admin/config",
+    response_model=ConfigOut,
+    summary="Effective configuration",
+    dependencies=[Depends(require_user)],
+)
 async def effective_config() -> ConfigOut:
     """
     Report the configuration actually in force.

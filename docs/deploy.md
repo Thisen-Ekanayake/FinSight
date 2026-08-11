@@ -175,10 +175,10 @@ repo is public.
 works as a deprecated alias, so an older Caddyfile will not break, but new
 ones should use `basic_auth`.)
 
-**This is not an optional extra.** There is no authentication anywhere
-inside the application — see §6. This
-directive is therefore the *only* access control on the deploy, and what sits
-behind it is not merely a read-only dashboard:
+**This is not an optional extra** until §6 is in place. Out of the box the
+application authenticates nobody — every route in `src/api/` is anonymous
+while `AUTH_ENABLED` is false — so this directive is the only access control
+the deploy has, and what sits behind it is not merely a read-only dashboard:
 
 - `POST /api/research/query` and `POST /api/monitor/cycles` spend real Vertex
   quota on every call, with no per-day ceiling on Gemini in `DAILY_BUDGETS`.
@@ -236,36 +236,108 @@ over `localhost`, not the public interface, so they never need to be open.
 (`8501` too, if you also brought up the legacy Streamlit dashboard with
 `--profile legacy`.)
 
-## 6. Before this stops being "a demo with a URL"
+## 6. Require a Google sign-in
 
-The project's own README already says this API is CORS-wide-open and
-single-user with no credentials to steal — see `src/api/main.py`. That is a
-deliberate, documented tradeoff for a portfolio deploy, not an oversight,
-but it means:
+§4's `basic_auth` is a door, not an identity: one shared credential
+authenticates everybody, so an approval through `POST
+/monitor/cycles/{id}/resume` cannot be attributed to a person. This replaces
+it with real accounts.
 
-- **The application itself authenticates nobody.** Every route in `src/api/`
-  is anonymous; there is no middleware, no dependency guard, and no API key
-  check. §4's `basic_auth` block is the whole of the access control, and it
-  is doing more work than it looks like — re-read §4 before removing it.
-- **Basic auth is a door, not an identity.** One shared credential
-  authenticates everybody who has it, which leaves two gaps it cannot close.
-  There is still no per-caller rate limiting, so an authorised visitor can
-  spend the quota as freely as an attacker could have. And an approval
-  through `POST /monitor/cycles/{id}/resume` still cannot be attributed to a
-  person, which is the one property an audit trail most wants. Closing
-  either means auth *inside* the app — OIDC against Google with an email
-  allowlist is the small version, since `google-auth` is already an installed
-  dependency and no user table would be needed.
-- **`allow_origins=["*"]`** in `src/api/main.py` should be narrowed once
-  there is one real origin to narrow it to. Note the single-origin setup
-  above means the browser never sends a cross-origin request at all, so
-  tightening this costs nothing — it only closes the door on someone else's
-  page scripting your API from a different origin.
-- This project explicitly does not do multi-user auth, rate limiting per
-  caller, or Kubernetes — see "Not doing" in the README. A public link
-  behind basic auth is the intended ceiling, not a first step toward more.
+**Create the OAuth client** in the Google Cloud console, in the same project
+the deploy already uses:
 
-## 7. Updating
+1. *APIs & Services → OAuth consent screen*. User type **External**. Fill in
+   an app name and your support/developer email. The only scopes needed are
+   `openid`, `email` and `profile`, all **non-sensitive** — so there is no
+   Google verification review to sit through. Leaving the app in *Testing*
+   with your own address as a test user is enough for a single-operator tool.
+2. *APIs & Services → Credentials → Create credentials → OAuth client ID*.
+   Application type **Web application**.
+3. Under **Authorised JavaScript origins**, add the origin the dashboard is
+   served from — `https://finsight.example.com`. Scheme and host must match
+   exactly, no path, no trailing slash. Add `http://localhost:5173` too if you
+   want `npm run dev` to sign in against this client.
+4. No **Authorised redirect URI** is needed. Google Identity Services returns
+   the token to the page; there is no server-side redirect leg in this flow.
+5. Copy the client ID. It ends in `.apps.googleusercontent.com`, and it is
+   **not a secret** — it appears in every OAuth flow, and `GET /auth/config`
+   serves it to any browser that asks.
+
+**Configure the deployment** in `.env`:
+
+```bash
+AUTH_ENABLED=true
+GOOGLE_OAUTH_CLIENT_ID=1234567890-abc123.apps.googleusercontent.com
+AUTH_ALLOWED_EMAILS=you@gmail.com,colleague@gmail.com
+```
+
+Then `docker compose up -d --build`. The bundle needs rebuilding only because
+it is a static image; the client ID itself is read at runtime from
+`/auth/config`, so the same image works against any deployment.
+
+Setting `AUTH_ENABLED=true` without both other values **aborts startup** rather
+than booting half-guarded — an empty allowlist would refuse every account while
+`/health` still reported the service fine.
+
+**Check the boundary before trusting it:**
+
+```bash
+curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/health          # 200
+curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/auth/config     # 200
+curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/admin/budgets   # 401
+curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/monitor/alerts  # 401
+```
+
+`/health` answering 200 is not an oversight and must stay that way:
+`docker-compose.yml` probes it to decide `service_healthy`, and the `web`
+container's `depends_on` waits on that. Guard it and the dashboard never
+starts.
+
+**Once this works, remove §4's `basic_auth` block** and reload Caddy. It has
+been superseded — leaving it on means signing in twice, through a browser
+credential dialog that no longer protects anything the application does not.
+
+**Signing in and still being refused is the expected behaviour** for an address
+not in `AUTH_ALLOWED_EMAILS`. That is a 403, deliberately distinct from the 401
+an expired token gets: the account is verified, it is simply not permitted, and
+retrying the sign-in cannot change that.
+
+## 7. Before this stops being "a demo with a URL"
+
+Assuming §6 is in place, what remains is narrower than it used to be — but it
+is not nothing:
+
+- **With `AUTH_ENABLED=false`, the application authenticates nobody.** Every
+  route in `src/api/` is anonymous unless §6 is configured; there is no
+  middleware and no API key check behind it. If you skipped §6, then §4's
+  `basic_auth` block is the entire access control and it is doing far more
+  work than it looks like — re-read §4 before removing it.
+- **Authentication is not rate limiting.** A signed-in, allowlisted caller can
+  spend Vertex quota as freely as a stranger could have. `DAILY_BUDGETS` in
+  `src/data/config.py` caps `fmp` and `alphavantage`; there is no Gemini
+  ceiling at all, and no per-caller limit anywhere.
+- **The allowlist is the whole authorisation model.** No roles, no per-user
+  data isolation, no ownership — every allowlisted account can do everything,
+  including approving another operator's paused alerts. No table in
+  `src/persistence/models.py` has an owner column.
+- **Approvals are authenticated but not yet recorded.** `require_user` knows
+  who resumed a cycle; `AlertRecord` does not store it. Until it does, the
+  audit trail proves a *permitted* human approved an alert, not *which* one.
+- **Leave `CORS_ALLOW_ORIGINS` empty** unless the dashboard and API really are
+  served from different origins. Empty means same-origin only, which is what
+  the nginx setup above already is. Never set it to `"*"`: with a bearer token
+  in the browser, that lets any page an operator visits drive this API from
+  its own origin.
+- **The sign-in session is the token's own lifetime** — about an hour, with no
+  silent refresh. Expiry surfaces as a 401 and returns the dashboard to the
+  sign-in screen, mid-research-run included. A backend-issued session cookie
+  is the fix if that becomes tiresome; there isn't one today.
+- This project does not do roles, per-user data isolation, or Kubernetes.
+  See "Not doing" in the [README](../README.md#not-doing). An allowlisted
+  Google sign-in is the intended ceiling, not a first step toward a user
+  system.
+
+## 8. Updating
 
 ```bash
 git pull
@@ -281,7 +353,7 @@ docker run --rm -v finsight_finsight-data:/data -v "$(pwd)":/backup alpine \
     tar czf /backup/finsight-data-backup.tar.gz -C /data .
 ```
 
-## 8. Tearing down
+## 9. Tearing down
 
 ```bash
 docker compose down          # stop and remove containers, KEEP volumes

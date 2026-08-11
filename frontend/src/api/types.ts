@@ -142,6 +142,17 @@ export interface ThreadResponse {
 }
 
 /** Liveness plus the state of each dependency. */
+/**
+ * How to sign in, read before anyone has.
+ *
+ * `client_id` is empty when `enabled` is false, so a deployment running
+ * without auth reveals nothing about one that does.
+ */
+export interface AuthConfig {
+  enabled: boolean;
+  client_id: string;
+}
+
 export interface Health {
   status: string;
   environment: string;

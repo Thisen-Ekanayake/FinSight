@@ -211,6 +211,34 @@ All free — see [`free_financial_data_sources.md`](./free_financial_data_source
 
 ---
 
+## Not doing
+
+Scope decisions, listed because "not built yet" and "deliberately absent" look
+identical from outside and only one of them is worth a pull request.
+
+**Access control stops at an allowlist.** `AUTH_ENABLED=true` puts every route
+but `/health` behind a Google sign-in, checked against a list of addresses in
+`.env` — see [`docs/deploy.md`](./docs/deploy.md) §6. That is the whole model.
+There are no roles, no per-user data isolation, and no ownership column on any
+table: every allowlisted account can do everything, including approving another
+operator's paused alerts. This is a single-operator tool with a real front
+door, not a multi-tenant service.
+
+**No per-caller rate limiting.** The limiters in `src/data/rate_limit.py` pace
+outbound calls to protect free tiers; they do not throttle inbound ones. An
+allowlisted caller can spend Vertex quota freely, and `DAILY_BUDGETS` sets no
+Gemini ceiling.
+
+**No session layer.** The Google ID token *is* the credential, so a session
+lasts about an hour and expiry means signing in again. No refresh tokens, no
+server-side sessions, no cookie or CSRF surface.
+
+**No Kubernetes, no managed platform.** `docker compose up` on one host is the
+deployment story, and `docs/deploy.md` is a guide someone follows rather than
+anything this repo executes.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please:

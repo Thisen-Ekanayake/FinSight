@@ -19,6 +19,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api.auth import require_user
 from src.api.research_routes import _series
 from src.persistence import db as db_module
 
@@ -206,6 +207,18 @@ def client(tmp_path):
         patch("src.vectorstore.collections.ensure_collections", lambda: {}),
     ):
         app = main_module.create_app()
+
+        # Every route but /health and /auth/config is behind require_user. These
+        # tests are about routing, translation and persistence, so they run as a
+        # fixed signed-in user rather than minting tokens.
+        #
+        # Overriding rather than relying on AUTH_ENABLED defaulting to false is
+        # the point: without this the suite passes or fails depending on whether
+        # the developer running it happens to have auth switched on in .env.
+        # dependency_overrides reaches router-level dependencies too, so this
+        # one line covers every guarded route.
+        app.dependency_overrides[require_user] = lambda: "tester@example.com"
+
         with TestClient(app) as test_client:
             test_client.graph = graph  # type: ignore[attr-defined]
             yield test_client

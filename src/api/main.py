@@ -34,10 +34,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.core.config import ENVIRONMENT
+# Imported as a module, not by value: create_app() reads AUTH_ENABLED and
+# CORS_ALLOW_ORIGINS at call time, and `from ... import X` would freeze both at
+# import — making the auth boundary untestable and surprising anyone who set an
+# env var after this module was first loaded.
+from src.core import config as core_config
+from src.core.config import validate_auth_config
 from src.core.errors import QdrantIsolationError
 from src.core.logging_setup import configure_logging
 from src.core.tracing import configure_tracing
@@ -62,6 +67,12 @@ see `MONITOR_SCHEDULER_ENABLED`), scores what it finds by rule, and
 **deduplicates** it against everything already reported. Every HIGH-severity
 finding pauses for a human decision — durably, via a LangGraph `interrupt()`
 checkpointed to disk — before it reaches console, file, or email.
+
+When `AUTH_ENABLED` is set, every route below needs a Google ID token as
+`Authorization: Bearer <token>` from an address in `AUTH_ALLOWED_EMAILS`.
+`GET /health` and `GET /auth/config` stay open — the first so container
+healthchecks work, the second because it is what an unauthenticated browser
+reads in order to sign in.
 
 * `POST /research/query` — ask a question
 * `GET /research/threads/{thread_id}` — replay the run's full audit trail
@@ -117,6 +128,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     configure_logging()
     configure_tracing()
+
+    # Before anything else can serve a request. An auth config that is switched
+    # on but incomplete refuses every account while reporting itself healthy,
+    # so it aborts startup for the same reason the Qdrant isolation assertion
+    # does — see validate_auth_config.
+    validate_auth_config()
+
     init_db()
 
     client, detail = _connect_qdrant()
@@ -147,7 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.research_graph = build_research_graph(checkpointer=saver)
         app.state.monitor_scheduler = start_scheduler(saver)
 
-        logger.info("FinSight API ready (env=%s, qdrant=%s)", ENVIRONMENT, detail)
+        logger.info(
+            "FinSight API ready (env=%s, auth=%s, qdrant=%s)", core_config.ENVIRONMENT, core_config.AUTH_ENABLED, detail
+        )
         yield
 
         stop_scheduler(app.state.monitor_scheduler)
@@ -167,31 +187,76 @@ def create_app() -> FastAPI:
     FastAPI
     """
     from src.api.admin_routes import router as admin_router
+    from src.api.auth import require_user
+    from src.api.auth_routes import router as auth_router
     from src.api.monitor_routes import router as monitor_router
     from src.api.research_routes import router as research_router
     from src.api.watchlist_routes import router as watchlist_router
+
+    # ══ WHY THE DOCS GO AWAY WHEN AUTH IS ON ══
+    #   FastAPI registers /docs, /redoc and /openapi.json itself, outside any
+    #   router — so the dependencies below do not reach them, and a guarded
+    #   deployment would still hand its whole API surface to anyone who asked.
+    #
+    #   Guarding them instead of removing them only looks better. /docs is
+    #   reached by typing a URL, and a browser navigation cannot carry an
+    #   Authorization header, so a guarded /docs is a 401 nobody can get past.
+    #   Swagger UI then fetches /openapi.json on load, before its Authorize
+    #   button has been touched, so a guarded schema breaks the page even for
+    #   someone holding a token. Both roads end at "unusable"; this one at
+    #   least does not pretend otherwise.
+    #
+    #   Run locally with AUTH_ENABLED=false to browse the API interactively.
+    interactive_docs = not core_config.AUTH_ENABLED
 
     app = FastAPI(
         title=API_TITLE,
         version=API_VERSION,
         description=API_DESCRIPTION,
         lifespan=lifespan,
+        docs_url="/docs" if interactive_docs else None,
+        redoc_url="/redoc" if interactive_docs else None,
+        openapi_url="/openapi.json" if interactive_docs else None,
     )
 
-    # Wide open because Phase 8's Streamlit UI is a separate origin and this
-    # API is single-user with no credentials to steal. Tighten before any
-    # deployment that is not a portfolio demo.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # Was ["*"], justified by this API being single-user with nothing to steal.
+    # A bearer token in the browser ends that: a wildcard lets any page a
+    # signed-in operator visits script this API from its own origin. Bearer
+    # credentials are not covered by the allow_credentials rule that makes such
+    # a mistake obvious with cookies, so nothing would complain.
+    #
+    # Unset means same-origin only, which is what the shipped topology already
+    # is — nginx serves the bundle and proxies /api underneath it, so the
+    # browser never makes a cross-origin call. Set CORS_ALLOW_ORIGINS only for
+    # a split-origin deployment.
+    if core_config.CORS_ALLOW_ORIGINS:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(core_config.CORS_ALLOW_ORIGINS),
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
-    app.include_router(research_router)
-    app.include_router(watchlist_router)
-    app.include_router(monitor_router)
+    # ══ THE AUTH BOUNDARY ══
+    #   Guarded at the router, so a route added later is guarded by default
+    #   rather than by whoever remembers. /health and /auth/config are the two
+    #   deliberate exceptions, both below.
+    guarded = [Depends(require_user)]
+
+    app.include_router(research_router, dependencies=guarded)
+    app.include_router(watchlist_router, dependencies=guarded)
+    app.include_router(monitor_router, dependencies=guarded)
+
+    # admin_router cannot take a blanket dependency: GET /health lives in it and
+    # has to stay open. docker-compose.yml probes it to decide service_healthy,
+    # which the web container's depends_on waits on — guard it and the frontend
+    # never starts. /admin/budgets and /admin/config carry their own Depends
+    # instead (see admin_routes.py).
     app.include_router(admin_router)
+
+    # Public by necessity: this is what an unauthenticated browser reads in
+    # order to become an authenticated one.
+    app.include_router(auth_router)
     return app
 
 

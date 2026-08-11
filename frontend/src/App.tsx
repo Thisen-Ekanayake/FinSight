@@ -11,21 +11,41 @@
 // ═══════════════════════════════════════════════════════
 
 import { Header } from './components/Header';
+import { Loading } from './components/primitives';
+import { useAuth } from './hooks/useAuth';
 import { useResource } from './hooks/useResource';
 import { useRoute } from './hooks/useRoute';
 import { useTheme } from './hooks/useTheme';
 import { Ask } from './views/Ask';
 import { Desk, loadPending } from './views/Desk';
 import { Findings } from './views/Findings';
+import { SignIn } from './views/SignIn';
 import { System } from './views/System';
 import { Watchlist } from './views/Watchlist';
 
 export function App() {
   const { view, navigate } = useRoute();
   const { theme, setTheme, vizColors } = useTheme();
+  const auth = useAuth();
+  const authed = auth.status === 'ready';
 
-  const pending = useResource(() => loadPending(), [], { pollMs: 45_000 });
+  // `enabled` matters more than it looks: this poll runs at the shell level so
+  // the header badge is right on every view, which means an unauthenticated
+  // session would otherwise fire a 401 every 45 seconds, forever.
+  const pending = useResource(() => loadPending(), [authed], { pollMs: 45_000, enabled: authed });
   const pendingCount = (pending.data ?? []).reduce((total, entry) => total + entry.alerts.length, 0);
+
+  // Deliberately before the shell: rendering Header and a view first would
+  // fire every view's own loader against a guarded API.
+  if (auth.status === 'loading') {
+    return (
+      <div style={{ minHeight: '100vh', background: 'var(--color-bg)', color: 'var(--color-text)' }}>
+        <Loading label="Checking sign-in…" />
+      </div>
+    );
+  }
+
+  if (!authed) return <SignIn auth={auth} />;
 
   return (
     // A column with the main region flexed to fill: the quiet Desk is short,
@@ -40,7 +60,15 @@ export function App() {
         color: 'var(--color-text)',
       }}
     >
-      <Header view={view} navigate={navigate} pendingCount={pendingCount} theme={theme} setTheme={setTheme} />
+      <Header
+        view={view}
+        navigate={navigate}
+        pendingCount={pendingCount}
+        theme={theme}
+        setTheme={setTheme}
+        email={auth.email}
+        onSignOut={auth.signOut}
+      />
 
       <div style={{ flex: '1 0 auto' }}>
         {view === 'desk' ? (

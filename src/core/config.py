@@ -110,6 +110,39 @@ CHECKPOINT_DB: Path = _resolve(os.getenv("CHECKPOINT_DB", "data/checkpoints.sqli
 HTTP_CACHE_PATH: Path = _resolve(os.getenv("HTTP_CACHE_PATH", "data/cache/http_cache"))
 EDGAR_CACHE_DIR: Path = _resolve(os.getenv("EDGAR_CACHE_DIR", "data/edgar"))
 
+# ── Authentication: Google Sign-In ──────────────────────
+# OFF by default, and that default is load-bearing. The CLIs, the eval
+# harness, and every test construct the app or call the graph without a
+# browser anywhere in reach; defaulting to on would make all of them
+# unrunnable. Deployments turn it on explicitly — see docs/deploy.md.
+AUTH_ENABLED: bool = os.getenv("AUTH_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+# The OAuth 2.0 Web client ID from the Google Cloud console. Public by
+# design — it travels in every OAuth flow and GET /auth/config serves it to
+# the browser — so it is NOT a secret and does not belong with the keys.
+GOOGLE_OAUTH_CLIENT_ID: str = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
+
+
+def _parse_emails(raw: str) -> frozenset[str]:
+    """Split a comma-separated allowlist, lowercased — addresses are matched case-insensitively."""
+    return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+# Authentication proves WHO is calling; this decides whether they may. A
+# verified Google account not named here is a 403, not a 401 — the sign-in
+# worked, the account simply is not permitted.
+AUTH_ALLOWED_EMAILS: frozenset[str] = _parse_emails(os.getenv("AUTH_ALLOWED_EMAILS", ""))
+
+# Extra browser origins allowed to call this API. Empty by default, which means
+# same-origin only — the shipped topology serves the bundle and proxies /api
+# under one origin (frontend/nginx.conf), so no cross-origin call is ever made.
+# Only a deliberately split deployment needs this, and it should name real
+# origins: "*" plus a bearer token in the browser lets any page the operator
+# visits drive this API.
+CORS_ALLOW_ORIGINS: tuple[str, ...] = tuple(
+    origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()
+)
+
 # ── Runtime ─────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
@@ -191,6 +224,54 @@ def validate_llm_credentials() -> None:
             "  Or set GOOGLE_APPLICATION_CREDENTIALS to a service-account key path.\n"
             "  Or run on GCE/Cloud Run/GKE with a service account attached."
         ) from exc
+
+
+def validate_auth_config() -> None:
+    """
+    Check that authentication, if switched on, is actually configured.
+
+    Deliberately fatal rather than a warning, for the same reason
+    ``QdrantIsolationError`` aborts startup in src/api/main.py: a
+    half-configured allowlist fails in one of two directions and both are
+    unacceptable. An empty ``AUTH_ALLOWED_EMAILS`` locks every account out of
+    an API that looks like it booted fine, and a missing client ID means no
+    token can ever be verified. Neither should be discovered through a 403 an
+    hour later.
+
+    Does nothing when ``AUTH_ENABLED`` is false, beyond warning if that looks
+    like a mistake in production.
+
+    Raises
+    ------
+    ConfigurationError
+        If AUTH_ENABLED is set but the client ID or the allowlist is empty.
+    """
+    import logging
+
+    from src.core.errors import ConfigurationError
+
+    if not AUTH_ENABLED:
+        if IS_PRODUCTION:
+            # Not fatal: a deploy may legitimately sit behind a proxy that
+            # authenticates for it (docs/deploy.md §4's basic_auth). Loud,
+            # because the other possibility is that nothing is guarding it.
+            logging.getLogger(__name__).warning(
+                "ENVIRONMENT=production but AUTH_ENABLED=false — the API authenticates nobody. "
+                "This is only safe behind a proxy that does (see docs/deploy.md)."
+            )
+        return
+
+    if not GOOGLE_OAUTH_CLIENT_ID:
+        raise ConfigurationError(
+            "AUTH_ENABLED=true but GOOGLE_OAUTH_CLIENT_ID is not set.\n"
+            "  Create an OAuth 2.0 Web client ID in the Google Cloud console (docs/deploy.md)."
+        )
+
+    if not AUTH_ALLOWED_EMAILS:
+        raise ConfigurationError(
+            "AUTH_ENABLED=true but AUTH_ALLOWED_EMAILS is empty — every account would be refused.\n"
+            "  Set it to a comma-separated list of the Google addresses allowed in."
+        )
 
 
 def ensure_data_dirs() -> None:

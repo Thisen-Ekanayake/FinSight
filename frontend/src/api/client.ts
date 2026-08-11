@@ -26,6 +26,7 @@
 
 import type {
   Alert,
+  AuthConfig,
   Budget,
   Config,
   Cycle,
@@ -51,6 +52,53 @@ export class ApiError extends Error {
     this.name = 'ApiError';
     this.status = status;
   }
+}
+
+// ══ AUTH: ONE TOKEN, TWO FETCH SITES ══
+//   The token lives here rather than in React state because askStream and
+//   request are plain functions that views call directly — threading it
+//   through every signature would touch every caller for no benefit.
+//
+//   It is deliberately NOT persisted to localStorage. A Google ID token is a
+//   bearer credential valid for about an hour; parking it where any script on
+//   the origin can read it buys a slightly shorter sign-in and pays for it in
+//   the worst currency available. Losing it on refresh is the correct
+//   trade — useAuth re-acquires silently when Google still has a session.
+
+let authToken: string | null = null;
+let onUnauthorized: (() => void) | null = null;
+
+/** Set (or clear, with null) the bearer token sent on every subsequent call. */
+export function setAuthToken(token: string | null): void {
+  authToken = token;
+}
+
+/**
+ * Register the callback fired when the API rejects our token.
+ *
+ * The token is cleared before the callback runs, so a handler that re-renders
+ * cannot race an in-flight retry into a second 401.
+ */
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
+function authHeaders(): Record<string, string> {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
+/**
+ * Handle a 401 once, centrally.
+ *
+ * 401 means the token is missing, expired or invalid — all recoverable by
+ * signing in again. 403 deliberately does NOT come through here: it means the
+ * account is verified but not on this deployment's allowlist, so bouncing to
+ * the sign-in screen would loop against a wall it can never get past.
+ */
+function handleUnauthorized(status: number): void {
+  if (status !== 401) return;
+  authToken = null;
+  onUnauthorized?.();
 }
 
 type Query = Record<string, string | number | boolean | undefined | null>;
@@ -80,7 +128,10 @@ async function request<T>(
   try {
     response = await fetch(withQuery(path, opts.params), {
       method,
-      headers: opts.body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: {
+        ...authHeaders(),
+        ...(opts.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       signal: opts.signal,
     });
@@ -90,6 +141,7 @@ async function request<T>(
   }
 
   if (!response.ok) {
+    handleUnauthorized(response.status);
     let detail = await response.text();
     try {
       detail = (JSON.parse(detail) as { detail?: string }).detail ?? detail;
@@ -134,7 +186,7 @@ export async function askStream(
   try {
     response = await fetch(`${API_BASE}/research/query/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: { ...authHeaders(), 'Content-Type': 'application/json', Accept: 'text/event-stream' },
       body: JSON.stringify(opts.threadId ? { query, thread_id: opts.threadId } : { query }),
       signal: opts.signal,
     });
@@ -144,6 +196,7 @@ export async function askStream(
   }
 
   if (!response.ok || !response.body) {
+    handleUnauthorized(response.status);
     throw new ApiError(`POST /research/query/stream -> ${response.status}: ${await response.text()}`, response.status);
   }
 
@@ -271,6 +324,18 @@ export function addTicker(ticker: string, companyName = ''): Promise<WatchItem> 
 export async function removeTicker(ticker: string): Promise<true> {
   await request<void>('DELETE', `/watchlist/${encodeURIComponent(ticker)}`);
   return true;
+}
+
+// ── Auth ────────────────────────────────────────────────
+
+/**
+ * Whether this deployment requires a sign-in, and against which client.
+ *
+ * Public, and the one call that must work before a token exists — everything
+ * else in this file is behind the guard this answer describes.
+ */
+export function authConfig(): Promise<AuthConfig> {
+  return request<AuthConfig>('GET', '/auth/config');
 }
 
 // ── Admin ───────────────────────────────────────────────
