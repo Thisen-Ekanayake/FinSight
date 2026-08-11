@@ -33,6 +33,15 @@
 #   would work today and quietly stop making sense the moment the two are
 #   deployed apart, which Phase 8's own docker-compose scaffolding already
 #   anticipates (api and ui are SEPARATE services).
+#
+# ══ THIS CLIENT DOES NOT AUTHENTICATE ══
+#   It sends no Authorization header, so against an API with AUTH_ENABLED=true
+#   every call here returns 401. Accepted, not overlooked. This is the
+#   superseded dashboard — it sits behind compose's "legacy" profile and does
+#   not start by default — and keeping it working would mean a second, static
+#   credential path, which is precisely the weakness Google sign-in was added
+#   to remove. Run it against a local API with auth off; the React dashboard
+#   in frontend/ is what a guarded deployment serves.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations

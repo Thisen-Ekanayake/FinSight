@@ -102,6 +102,10 @@ services:
   # — but it does not start by default. Bring it up deliberately:
   #
   #   docker compose --profile legacy up -d ui
+  #
+  # It sends no Authorization header (see src/ui/client.py), so with
+  # AUTH_ENABLED=true every call it makes returns 401. Useful against a local
+  # API with auth off; not something to expose on a guarded deployment.
   ui:
     build: .
     container_name: finsight-ui
