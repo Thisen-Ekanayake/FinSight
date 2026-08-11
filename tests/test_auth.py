@@ -292,6 +292,56 @@ def test_health_is_reachable_without_a_token() -> None:
             assert test_client.post("/monitor/cycles", json={"warmup": False}).status_code == 401
 
 
+def _build_real_app() -> Any:
+    """The real create_app(), with only the external services stubbed out."""
+    import src.api.main as main_module
+
+    @asynccontextmanager
+    async def fake_checkpointer() -> Any:
+        yield object()
+
+    return main_module, fake_checkpointer
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_the_api_schema_is_not_public_when_auth_is_on(path: str) -> None:
+    """
+    FastAPI registers these itself, outside every router.
+
+    So the router-level dependencies do not reach them, and without explicitly
+    switching them off a guarded deployment still hands its entire API surface
+    — all 17 paths — to anyone who asks. Guarding them instead is not an
+    option: /docs is reached by typing a URL and a browser navigation cannot
+    carry an Authorization header.
+    """
+    main_module, fake_checkpointer = _build_real_app()
+
+    with (
+        patch.object(main_module, "async_checkpointer", fake_checkpointer),
+        patch.object(main_module, "build_research_graph", lambda checkpointer=None: object()),
+        patch.object(main_module, "_connect_qdrant", lambda: (None, "unavailable")),
+        patch("src.vectorstore.collections.ensure_collections", lambda: {}),
+    ):
+        with TestClient(main_module.create_app()) as test_client:
+            assert test_client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/docs", "/openapi.json"])
+def test_the_api_schema_stays_available_when_auth_is_off(path: str) -> None:
+    """Turning auth off is also how you get the interactive docs back locally."""
+    main_module, fake_checkpointer = _build_real_app()
+
+    with (
+        patch.object(core_config, "AUTH_ENABLED", False),
+        patch.object(main_module, "async_checkpointer", fake_checkpointer),
+        patch.object(main_module, "build_research_graph", lambda checkpointer=None: object()),
+        patch.object(main_module, "_connect_qdrant", lambda: (None, "unavailable")),
+        patch("src.vectorstore.collections.ensure_collections", lambda: {}),
+    ):
+        with TestClient(main_module.create_app()) as test_client:
+            assert test_client.get(path).status_code == 200
+
+
 # ── Auth switched off ───────────────────────────────────
 def test_disabled_auth_admits_everyone_as_the_sentinel(client: TestClient) -> None:
     """

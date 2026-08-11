@@ -37,7 +37,12 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.core.config import CORS_ALLOW_ORIGINS, ENVIRONMENT, validate_auth_config
+# Imported as a module, not by value: create_app() reads AUTH_ENABLED and
+# CORS_ALLOW_ORIGINS at call time, and `from ... import X` would freeze both at
+# import — making the auth boundary untestable and surprising anyone who set an
+# env var after this module was first loaded.
+from src.core import config as core_config
+from src.core.config import validate_auth_config
 from src.core.errors import QdrantIsolationError
 from src.core.logging_setup import configure_logging
 from src.core.tracing import configure_tracing
@@ -160,7 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.research_graph = build_research_graph(checkpointer=saver)
         app.state.monitor_scheduler = start_scheduler(saver)
 
-        logger.info("FinSight API ready (env=%s, qdrant=%s)", ENVIRONMENT, detail)
+        logger.info(
+            "FinSight API ready (env=%s, auth=%s, qdrant=%s)", core_config.ENVIRONMENT, core_config.AUTH_ENABLED, detail
+        )
         yield
 
         stop_scheduler(app.state.monitor_scheduler)
@@ -186,11 +193,30 @@ def create_app() -> FastAPI:
     from src.api.research_routes import router as research_router
     from src.api.watchlist_routes import router as watchlist_router
 
+    # ══ WHY THE DOCS GO AWAY WHEN AUTH IS ON ══
+    #   FastAPI registers /docs, /redoc and /openapi.json itself, outside any
+    #   router — so the dependencies below do not reach them, and a guarded
+    #   deployment would still hand its whole API surface to anyone who asked.
+    #
+    #   Guarding them instead of removing them only looks better. /docs is
+    #   reached by typing a URL, and a browser navigation cannot carry an
+    #   Authorization header, so a guarded /docs is a 401 nobody can get past.
+    #   Swagger UI then fetches /openapi.json on load, before its Authorize
+    #   button has been touched, so a guarded schema breaks the page even for
+    #   someone holding a token. Both roads end at "unusable"; this one at
+    #   least does not pretend otherwise.
+    #
+    #   Run locally with AUTH_ENABLED=false to browse the API interactively.
+    interactive_docs = not core_config.AUTH_ENABLED
+
     app = FastAPI(
         title=API_TITLE,
         version=API_VERSION,
         description=API_DESCRIPTION,
         lifespan=lifespan,
+        docs_url="/docs" if interactive_docs else None,
+        redoc_url="/redoc" if interactive_docs else None,
+        openapi_url="/openapi.json" if interactive_docs else None,
     )
 
     # Was ["*"], justified by this API being single-user with nothing to steal.
@@ -203,10 +229,10 @@ def create_app() -> FastAPI:
     # is — nginx serves the bundle and proxies /api underneath it, so the
     # browser never makes a cross-origin call. Set CORS_ALLOW_ORIGINS only for
     # a split-origin deployment.
-    if CORS_ALLOW_ORIGINS:
+    if core_config.CORS_ALLOW_ORIGINS:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=list(CORS_ALLOW_ORIGINS),
+            allow_origins=list(core_config.CORS_ALLOW_ORIGINS),
             allow_methods=["*"],
             allow_headers=["*"],
         )
