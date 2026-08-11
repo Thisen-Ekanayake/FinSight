@@ -187,6 +187,20 @@ class ThreadResponse(BaseModel):
     steps: list[ThreadStep]
 
 
+# ── Auth ────────────────────────────────────────────────
+class AuthConfigOut(BaseModel):
+    """
+    What the browser needs in order to sign in.
+
+    Holds no secret. ``client_id`` is public by construction — it appears in
+    every OAuth flow — and is empty when ``enabled`` is false so that a
+    deployment running without auth reveals nothing about one that does.
+    """
+
+    enabled: bool
+    client_id: str
+
+
 # ── Admin ───────────────────────────────────────────────
 class HealthResponse(BaseModel):
     """Liveness plus the state of each dependency."""

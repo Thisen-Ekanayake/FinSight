@@ -133,6 +133,16 @@ def _parse_emails(raw: str) -> frozenset[str]:
 # worked, the account simply is not permitted.
 AUTH_ALLOWED_EMAILS: frozenset[str] = _parse_emails(os.getenv("AUTH_ALLOWED_EMAILS", ""))
 
+# Extra browser origins allowed to call this API. Empty by default, which means
+# same-origin only — the shipped topology serves the bundle and proxies /api
+# under one origin (frontend/nginx.conf), so no cross-origin call is ever made.
+# Only a deliberately split deployment needs this, and it should name real
+# origins: "*" plus a bearer token in the browser lets any page the operator
+# visits drive this API.
+CORS_ALLOW_ORIGINS: tuple[str, ...] = tuple(
+    origin.strip() for origin in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if origin.strip()
+)
+
 # ── Runtime ─────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
