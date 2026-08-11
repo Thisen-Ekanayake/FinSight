@@ -1,33 +1,28 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════
-# FinSight — Web Dashboard (dev)
+# FinSight — Streamlit Dashboard
 # ═══════════════════════════════════════════════════════
 #
-# Starts the Vite dev server at http://localhost:5173 with hot reload. It
-# proxies /api to the FastAPI backend (API_URL, default http://localhost:8000)
-# — start that first with `make api` or `docker compose up -d api`.
-#
-# For the production bundle instead, use `make web-build` or bring up the
-# `web` service in docker-compose.yml.
+# Starts the dashboard at http://localhost:8501. Talks to the API over HTTP
+# (API_URL, default http://localhost:8000) — start that first.
 #
 # Usage:
-#   ./run_web.sh
+#   ./shell_scripts/run_ui.sh
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")/frontend"
+cd "$(dirname "$0")/.."
 
-if [[ ! -d node_modules ]]; then
-    echo "Installing frontend dependencies (first run)…" >&2
-    npm install
+if [[ ! -x .venv/bin/python ]]; then
+    echo "No .venv found. Run: make venv && make install" >&2
+    exit 1
 fi
 
 API_URL="${API_URL:-http://localhost:8000}"
-export API_URL
 
 if ! curl -sf "${API_URL}/health" >/dev/null 2>&1; then
     echo "WARNING: cannot reach the API at ${API_URL} — start it first with: make api" >&2
 fi
 
-echo "FinSight dashboard -> http://localhost:5173  (API: ${API_URL})"
-exec npm run dev -- --host "${VITE_HOST:-localhost}" "$@"
+echo "FinSight dashboard -> http://localhost:8501"
+exec .venv/bin/python -m streamlit run src/ui/app.py --server.port 8501 "$@"

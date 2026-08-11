@@ -13,7 +13,7 @@
 # ══ WHY IN THE API PROCESS, NOT A SEPARATE CRON ══
 #   The API already holds the one long-lived resource a scheduled cycle
 #   needs — the checkpointer (see main.py's lifespan). A cron invocation of
-#   `run_monitor.sh --once` works too (it opens its own connection to the
+#   `shell_scripts/run_monitor.sh --once` works too (it opens its own connection to the
 #   same checkpoint database), but there is no reason to run a second
 #   always-on process when the API already is one for everything else here.
 #

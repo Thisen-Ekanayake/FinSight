@@ -16,7 +16,7 @@
 #   main()
 #
 # Usage:
-#   ./run_evals.sh alerts
+#   ./shell_scripts/run_evals.sh alerts
 #   .venv/bin/python -m evals.run_monitor_eval
 #   .venv/bin/python -m evals.run_monitor_eval --min-precision 0.95
 #

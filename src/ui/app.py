@@ -8,7 +8,7 @@
 #           into one app.
 #
 # Usage:
-#   ./run_ui.sh
+#   ./shell_scripts/run_ui.sh
 #   streamlit run src/ui/app.py
 # ═══════════════════════════════════════════════════════
 

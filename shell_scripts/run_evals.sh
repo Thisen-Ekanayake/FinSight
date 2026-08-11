@@ -7,13 +7,13 @@
 # Suite B (the dedup TAU_HIGH threshold sweep) is Phase 7.
 #
 # Usage:
-#   ./run_evals.sh research                          # baseline, all 40 examples
-#   ./run_evals.sh research --variant strict-src
-#   ./run_evals.sh research --limit 5 --no-judges    # free harness smoke run
-#   ./run_evals.sh build                             # rebuild the golden dataset
-#   ./run_evals.sh check                             # is the committed dataset current?
-#   ./run_evals.sh alerts                             # dedup threshold sweep
-#   ./run_evals.sh alerts --min-precision 0.95
+#   ./shell_scripts/run_evals.sh research                          # baseline, all 40 examples
+#   ./shell_scripts/run_evals.sh research --variant strict-src
+#   ./shell_scripts/run_evals.sh research --limit 5 --no-judges    # free harness smoke run
+#   ./shell_scripts/run_evals.sh build                             # rebuild the golden dataset
+#   ./shell_scripts/run_evals.sh check                             # is the committed dataset current?
+#   ./shell_scripts/run_evals.sh alerts                             # dedup threshold sweep
+#   ./shell_scripts/run_evals.sh alerts --min-precision 0.95
 #
 # An eval run is the largest quota spike in this project — the runner prints an
 # estimate and waits for confirmation before spending anything. Suite B is the
@@ -22,7 +22,7 @@
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [[ ! -x .venv/bin/python ]]; then
     echo "No .venv found. Run: make venv && make install" >&2
@@ -59,7 +59,7 @@ case "$SUITE" in
         exec .venv/bin/python -m evals.run_monitor_eval "$@"
         ;;
     *)
-        echo "Usage: ./run_evals.sh {research|build|check|alerts} [options]" >&2
+        echo "Usage: ./shell_scripts/run_evals.sh {research|build|check|alerts} [options]" >&2
         exit 1
         ;;
 esac

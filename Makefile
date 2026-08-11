@@ -128,13 +128,13 @@ format:
 
 # ── Entrypoints ─────────────────────────────────
 api: .env
-	./run_api.sh
+	./shell_scripts/run_api.sh
 
 # The dashboard. `web` is the React + three.js frontend and the one to use;
 # `ui` is the Streamlit original, kept as the reference implementation of
 # every call the UI makes.
 web:
-	./run_web.sh
+	./shell_scripts/run_web.sh
 
 web-build:
 	cd frontend && npm ci && npm run build
@@ -143,57 +143,57 @@ web-check:
 	cd frontend && npm run typecheck
 
 ui: .env
-	./run_ui.sh
+	./shell_scripts/run_ui.sh
 
 ingest:
-	./run_ingest.sh
+	./shell_scripts/run_ingest.sh
 
 # Pass a question:  make research Q="How did Apple's gross margin trend?"
 research:
-	./run_research.sh "$(Q)"
+	./shell_scripts/run_research.sh "$(Q)"
 
 # Run --warmup ONCE before the first real cycle. A cold dedup index has nothing
 # to match against, so cycle 1 would otherwise report every open filing, every
 # recent article, and every price move in one burst.
 monitor:
-	./run_monitor.sh --once
+	./shell_scripts/run_monitor.sh --once
 
 monitor-warmup:
-	./run_monitor.sh --once --warmup
+	./shell_scripts/run_monitor.sh --once --warmup
 
 # The watchlist, with each monitor's last-checked watermark.
 watchlist:
-	./run_monitor.sh --watchlist
+	./shell_scripts/run_monitor.sh --watchlist
 
 # Every dedup decision and the similarity score behind it. This is the table
 # Phase 7's threshold sweep is calibrated against — eyeballing it is how you
 # notice the bands have drifted before the sweep tells you so.
 decisions:
-	./run_monitor.sh --decisions
+	./shell_scripts/run_monitor.sh --decisions
 
 # Cycles paused on a HIGH alert, and what they are actually waiting on.
 pending:
-	./run_monitor.sh --pending
+	./shell_scripts/run_monitor.sh --pending
 
 # An eval run is the largest quota spike in this project; run_evals.sh prints
 # an estimate and waits for confirmation before spending anything.
 #   make evals                    baseline over all 40 examples
 #   make evals V=strict-src       one named single-variable experiment
 evals:
-	./run_evals.sh research $(if $(V),--variant $(V))
+	./shell_scripts/run_evals.sh research $(if $(V),--variant $(V))
 
 # Rebuild the golden dataset from XBRL. Only needed when the spec changes —
 # filed figures are immutable, so the committed values never go stale.
 evals-build:
-	./run_evals.sh build
+	./shell_scripts/run_evals.sh build
 
 evals-check:
-	./run_evals.sh check
+	./shell_scripts/run_evals.sh check
 
 # Suite B: the dedup TAU_HIGH threshold sweep. Local bge-small only — no LLM
 # call, no confirmation prompt, safe to re-run any time the bands are in doubt.
 evals-alerts:
-	./run_evals.sh alerts
+	./shell_scripts/run_evals.sh alerts
 
 # ── Container utilities ─────────────────────────
 logs:

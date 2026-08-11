@@ -9,13 +9,13 @@
 # re-ingesting overwrites rather than duplicating.
 #
 # Usage:
-#   ./run_ingest.sh                        # the configured watchlist
-#   ./run_ingest.sh --ticker AAPL          # one ticker
-#   ./run_ingest.sh --form 10-K --limit 2  # pass through any ingest flag
+#   ./shell_scripts/run_ingest.sh                        # the configured watchlist
+#   ./shell_scripts/run_ingest.sh --ticker AAPL          # one ticker
+#   ./shell_scripts/run_ingest.sh --form 10-K --limit 2  # pass through any ingest flag
 # ───────────────────────────────────────────────────────
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [[ ! -x .venv/bin/python ]]; then
     echo "No .venv found. Run: make venv && make install" >&2

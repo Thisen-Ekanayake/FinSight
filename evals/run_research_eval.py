@@ -12,9 +12,9 @@
 #   main()                    CLI
 #
 # Usage:
-#   ./run_evals.sh research                        # baseline, all 40
-#   ./run_evals.sh research --variant k12
-#   ./run_evals.sh research --limit 5 --no-judges  # free smoke run
+#   ./shell_scripts/run_evals.sh research                        # baseline, all 40
+#   ./shell_scripts/run_evals.sh research --variant k12
+#   ./shell_scripts/run_evals.sh research --limit 5 --no-judges  # free smoke run
 #
 # ══ WHY EVERY EXPERIMENT RUNS THE WHOLE DATASET ══
 #   --limit exists for checking the harness, not for producing results. Two

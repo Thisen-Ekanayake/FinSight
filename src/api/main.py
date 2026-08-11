@@ -24,7 +24,7 @@
 #   error that could write into another project's data, so it aborts startup.
 #
 # Usage:
-#   ./run_api.sh
+#   ./shell_scripts/run_api.sh
 #   uvicorn src.api.main:app --reload
 # ═══════════════════════════════════════════════════════
 
