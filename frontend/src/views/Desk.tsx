@@ -18,7 +18,7 @@
 //   the only defensible one. Do not soften this into a disabled submit.
 //
 // ══ WHY THE QUIET STATE GOT THE SAME EFFORT AS THE BUSY ONE ══
-//   Most cycles produce zero HIGH alerts, so "nothing needs you" is what this
+//   Most cycles produce zero HIGH alerts, so "nothing is waiting on you" is what this
 //   screen shows most days. It gets the same 64px headline and a real
 //   sentence about what the machine did while nobody was looking.
 // ═══════════════════════════════════════════════════════
@@ -172,7 +172,7 @@ export function Desk({
                   margin: '0 0 22px',
                 }}
               >
-                Nothing needs you.
+                Nothing is waiting on you.
               </h1>
               <p style={{ fontSize: 18, maxWidth: '46ch', margin: 0, color: 'var(--ink-74)', textWrap: 'pretty' }}>
                 {worked.runs > 0
