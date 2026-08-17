@@ -20,8 +20,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api/client';
-import type { QueryResponse, RunSummary, SeriesPoint, StreamEvent } from '../api/types';
+import type { Quota, QueryResponse, QuotaExceeded, RunSummary, SeriesPoint, StreamEvent } from '../api/types';
 import { useResource } from '../hooks/useResource';
+import { ContactSales } from '../components/ContactSales';
 import { ErrorNote, Kicker, PageHead } from '../components/primitives';
 import { renderAnswer, unlocatedClaims } from '../lib/answer';
 import { compact, humanise, percent, plural, seconds, stamp } from '../lib/format';
@@ -64,18 +65,25 @@ interface Stage {
   errors: string[];
 }
 
-export function Ask() {
+export function Ask({ quota, onSpend }: { quota?: Quota | null; onSpend?: () => void }) {
   const [question, setQuestion] = useState('');
   const [running, setRunning] = useState(false);
   const [stages, setStages] = useState<Stage[]>([]);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<QueryResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Set from a 402. The server is authoritative: a stale client count — a
+  // second tab, another device — must still produce the CTA rather than a
+  // raw error string, so this is what actually gates the form once it is set.
+  const [blocked, setBlocked] = useState<QuotaExceeded | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const startedRef = useRef(0);
 
   const runs = useResource(() => api.listRuns(8), []);
+
+  const metered = quota?.metered ?? false;
+  const exhausted = blocked !== null || (metered && quota!.remaining <= 0);
 
   // A wall clock rather than an animation: the number on screen is how long
   // the person has actually been waiting.
@@ -91,7 +99,7 @@ export function Ask() {
     async (event: React.FormEvent) => {
       event.preventDefault();
       const query = question.trim();
-      if (query.length < 3 || running) return;
+      if (query.length < 3 || running || exhausted) return;
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -121,15 +129,22 @@ export function Ask() {
         const final = await api.askStream(query, onEvent, { signal: controller.signal });
         setResult(final);
         runs.reload();
+        // One extra cheap GET per query, rather than threading the new count
+        // back through the SSE `final` frame or a custom response header —
+        // the latter would need expose_headers on a split-origin deployment.
+        onSpend?.();
       } catch (exc) {
-        if (!(exc instanceof DOMException && exc.name === 'AbortError')) {
+        if (exc instanceof api.QuotaError) {
+          setBlocked(exc.quota);
+          onSpend?.();
+        } else if (!(exc instanceof DOMException && exc.name === 'AbortError')) {
           setError(exc instanceof Error ? exc.message : String(exc));
         }
       } finally {
         setRunning(false);
       }
     },
-    [question, running, runs],
+    [question, running, exhausted, runs, onSpend],
   );
 
   const progress = useMemo(() => {
@@ -156,24 +171,47 @@ export function Ask() {
         anything that cannot be traced is marked, not deleted.
       </PageHead>
 
-      <form onSubmit={submit} style={{ display: 'flex', gap: 10, marginBottom: 26 }}>
+      <form onSubmit={submit} style={{ display: 'flex', gap: 10, marginBottom: metered ? 10 : 26 }}>
         <input
           className="input"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           placeholder="How did Apple's gross margin trend over the last three fiscal years?"
           aria-label="Research question"
+          disabled={exhausted}
           style={{ flex: '1 1 auto', minWidth: 0, fontSize: 15 }}
         />
         <button
           className="btn btn-primary"
           type="submit"
-          disabled={running || question.trim().length < 3}
+          disabled={running || exhausted || question.trim().length < 3}
           style={{ flex: 'none', padding: '9px 20px' }}
         >
           {running ? 'Working…' : 'Ask'}
         </button>
       </form>
+
+      {/* Shown before a query is spent, not after — the last free query and
+          the first refused one are otherwise indistinguishable until it is
+          too late to choose a different question. */}
+      {metered && !exhausted ? (
+        <p
+          className="mono"
+          style={{ fontSize: 12, letterSpacing: '0.04em', color: 'var(--ink-58)', margin: '0 0 26px' }}
+        >
+          {quota!.remaining} of {quota!.limit} free {quota!.remaining === 1 ? 'query' : 'queries'} left
+        </p>
+      ) : null}
+
+      {exhausted ? (
+        <div style={{ marginBottom: 34 }}>
+          <ContactSales
+            contactUrl={blocked?.contact_url ?? quota?.contact_url ?? ''}
+            used={blocked?.used ?? quota?.used}
+            limit={blocked?.limit ?? quota?.limit}
+          />
+        </div>
+      ) : null}
 
       <div
         className="mono"

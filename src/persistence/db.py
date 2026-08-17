@@ -22,8 +22,10 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateColumn
 
 from src.core.config import DATABASE_URL, ensure_data_dirs
 from src.persistence.config import SQLITE_CONNECT_ARGS, SQLITE_PRAGMAS
@@ -85,16 +87,98 @@ def get_engine() -> Engine:
     return _engine
 
 
+def _sync_additive_schema(engine: Engine) -> None:
+    """
+    Add columns and indexes the models declare and the database lacks.
+
+    ══ WHY THIS EXISTS ══
+      create_all() creates absent TABLES and skips any table that already
+      exists — including that table's declared indexes. So the first column
+      ever added to a live table was, until this helper, a real migration and
+      nothing less. Alembic on a nine-table single-writer SQLite project is
+      ceremony; this is the 5% of it that is actually load-bearing.
+
+    ══ ADDITIVE ONLY, AND THAT IS THE WHOLE SAFETY ARGUMENT ══
+      It never drops, renames, retypes or reorders. Every operation it
+      performs is one that a rollback of the application code survives
+      untouched — deploy, revert, and the database still works with the old
+      code. Anything else is a hand-written script and a maintenance window,
+      not this.
+
+    Idempotent: on a database create_all() just built, every column and index
+    is already present, so this is two introspection queries and no DDL.
+
+    Raises
+    ------
+    RuntimeError
+        If a declared column cannot be added by ADD COLUMN at all. Better to
+        fail in review than at 3am on the VM.
+    """
+    inspector = inspect(engine)
+
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue  # create_all built it just now, with everything on it
+
+        present = {column["name"] for column in inspector.get_columns(table.name)}
+
+        for column in table.columns:
+            if column.name in present:
+                continue
+
+            # ADD COLUMN cannot create a key, and SQLite rejects a NOT NULL
+            # column outright unless the statement carries a default it can
+            # backfill with ("Cannot add a NOT NULL column with default value
+            # NULL"). Catching both here turns a bad model change into a test
+            # failure rather than a broken deploy.
+            if column.primary_key or column.unique:
+                raise RuntimeError(
+                    f"{table.name}.{column.name} is a key column; ADD COLUMN cannot create it. "
+                    "This needs a real migration."
+                )
+            if not column.nullable and column.server_default is None:
+                raise RuntimeError(
+                    f"{table.name}.{column.name} is NOT NULL with no server_default; "
+                    "ADD COLUMN has nothing to backfill existing rows with. "
+                    "Give it a server_default, or make it nullable."
+                )
+
+            statement = f"ALTER TABLE {table.name} ADD COLUMN {CreateColumn(column).compile(engine).string}"
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text(statement))
+            except OperationalError as exc:
+                # The API's lifespan and a monitor CLI on the same host can
+                # both call init_db() at once. The loser sees "duplicate
+                # column name", which is the state we wanted anyway.
+                if "duplicate column" not in str(exc).lower():
+                    raise
+                logger.debug("%s.%s was added concurrently", table.name, column.name)
+            else:
+                logger.info("Schema: added %s.%s", table.name, column.name)
+
+        for index in table.indexes:
+            # checkfirst issues the dialect's own existence check, which is
+            # portable in a way CREATE INDEX IF NOT EXISTS is not.
+            index.create(bind=engine, checkfirst=True)
+
+
 def init_db() -> None:
     """
-    Create every table that does not yet exist.
+    Bring the database up to the schema the models declare.
 
-    Idempotent, so it is safe to call on every application start. There is no
-    migration tool here on purpose: the schema is small, additive, and a
-    single developer's, and Alembic on a five-table SQLite project is ceremony
-    without benefit. Revisit if this ever grows a second writer.
+    Idempotent, so it is safe to call on every application start.
+
+    There is still no migration TOOL here on purpose — the schema is small and
+    a single developer's, and Alembic would be ceremony. What there is instead
+    is create_all() for new tables plus _sync_additive_schema for new columns
+    and indexes on existing ones. That covers every schema change this project
+    has actually needed. It deliberately does not cover the destructive ones;
+    those want a script and a person watching.
     """
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    _sync_additive_schema(engine)
     logger.info("Database ready: %s", DATABASE_URL)
 
 

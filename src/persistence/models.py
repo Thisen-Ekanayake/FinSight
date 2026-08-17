@@ -5,7 +5,7 @@
 # Purpose : SQLAlchemy 2.0 declarative models for the application database.
 #
 # Public API:
-#   Base, ResearchRun, ApiBudget
+#   Base, ResearchRun, ApiBudget, FreeQueryQuota
 #   WatchItem, MonitorCheckpoint, AlertRecord, MonitorCycle, DedupDecision
 #
 # ══ WHAT IS AND IS NOT STORED HERE ══
@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -53,12 +53,39 @@ class ResearchRun(Base):
     ``thread_id`` is the join key into the checkpointer: given a row here, the
     full state history is one ``get_state_history`` call away. That is what the
     audit-trail endpoint returns.
+
+    ══ THIS ROW IS ALSO THE ONLY RECORD OF WHO OWNS A THREAD ══
+      The checkpointer has no identity anywhere — its tables are LangGraph's,
+      keyed by thread_id alone. So ``subject`` here is the single thing that
+      can say whose transcript that is, and ``can_use_thread`` in the
+      repository is the only gate on replaying one.
     """
 
     __tablename__ = "research_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+
+    # ── Who asked ──
+    # Google's `sub`, matching free_query_quotas — an account can change its
+    # address, and history keyed by email would follow it to the wrong owner.
+    #
+    # server_default is load-bearing, not decoration: `default=` is applied by
+    # SQLAlchemy on INSERT and never reaches DDL, and SQLite refuses
+    # ALTER TABLE ADD COLUMN ... NOT NULL without a non-NULL default in the
+    # statement itself. Carrying both is what lets _sync_additive_schema add
+    # this column to a live table AND backfill every existing row to '' rather
+    # than NULL — so every visibility predicate is a plain equality with no
+    # IS NULL branch for anyone to forget.
+    #
+    # '' means unattributable: written before this column existed, or by the
+    # CLI, which has no identity. See LEGACY_SUBJECT in the repository.
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default=text("''"))
+    # A label for whoever reads the table directly, never a key and never
+    # serialised to a client. Unlimited-tier accounts never get a
+    # free_query_quotas row, so without this their `subject` is an opaque
+    # Google id with nothing to join it to.
+    owner_email: Mapped[str] = mapped_column(String(320), nullable=False, default="", server_default=text("''"))
 
     query: Mapped[str] = mapped_column(Text, nullable=False)
     final_answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -79,7 +106,12 @@ class ResearchRun(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
 
-    __table_args__ = (Index("ix_research_runs_created_coverage", "created_at", "citation_coverage"),)
+    __table_args__ = (
+        Index("ix_research_runs_created_coverage", "created_at", "citation_coverage"),
+        # Every listing is now "this account's runs, newest first", so the
+        # owner leads and created_at follows.
+        Index("ix_research_runs_subject_created", "subject", "created_at"),
+    )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ResearchRun {self.thread_id} coverage={self.citation_coverage:.2f}>"
@@ -110,6 +142,51 @@ class ApiBudget(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<ApiBudget {self.provider} {self.day}={self.call_count}>"
+
+
+class FreeQueryQuota(Base):
+    """
+    One Google account's lifetime free-query counter.
+
+    ══ WHY A NEW TABLE AND NOT A COLUMN ══
+      A quota is per-account, not per-run, so it has nowhere else to live.
+      When this was written it was also the only option: create_all() creates
+      absent tables and never alters existing ones, so a new table was free
+      and a new column was impossible. That second reason is gone —
+      _sync_additive_schema in db.py adds columns to live tables now, which is
+      how research_runs.subject arrived. The first reason still stands.
+
+    ══ WHY KEYED BY `sub` AND NOT BY EMAIL ══
+      A Google account can change its address. A counter keyed by email would
+      reset when it did, handing out a fresh allowance for the cost of an
+      email change. ``email`` is stored anyway, denormalised, so the operator
+      can see who is actually using the deployment — but it is a label, never
+      the key.
+
+    ══ WHY NO `limit` COLUMN ══
+      The allowance is configuration (FREE_QUERY_LIMIT), not a property of the
+      account. Freezing it per row would mean raising the limit later only
+      helped accounts created after the change, which is the opposite of what
+      raising a free tier is for.
+
+    Note for any future retention sweep: this table must never be pruned. The
+    quota is lifetime, so deleting an "inactive" row silently grants that
+    account a whole new allowance.
+    """
+
+    __tablename__ = "free_query_quotas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+
+    used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<FreeQueryQuota {self.subject} used={self.used}>"
 
 
 # ═══════════════════════════════════════════════════════

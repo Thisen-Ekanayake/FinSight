@@ -6,11 +6,17 @@
 #           TypedDicts rather than ORM objects.
 #
 # Public API:
-#   record_research_run(state, latency_ms)  -> str
-#   list_research_runs(limit)               -> list[ResearchRunSummary]
-#   get_research_run(thread_id)             -> ResearchRunSummary | None
+#   record_research_run(state, thread_id, subject, latency_ms) -> str
+#   list_research_runs(subject, unlimited, limit) -> list[ResearchRunSummary]
+#   get_research_run(thread_id, subject, unlimited) -> ResearchRunSummary | None
+#   can_use_thread(thread_id, subject, unlimited)   -> bool
 #   record_api_call(provider, count)        -> int
 #   get_budget_status()                     -> list[BudgetStatus]
+#
+#   ── free tier ──
+#   get_free_quota(subject, limit)          -> FreeQuotaStatus
+#   consume_free_query(subject, limit)      -> FreeQuotaStatus | None
+#   refund_free_query(subject)              -> None
 #
 #   ── monitoring (Phase 6) ──
 #   list_watchlist / add_watch_item / remove_watch_item / mark_warmed_up
@@ -34,7 +40,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, TypedDict
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from src.data.config import BUDGET_SOFT_LIMIT, DAILY_BUDGETS
 from src.persistence.db import session_scope
@@ -42,6 +49,7 @@ from src.persistence.models import (
     AlertRecord,
     ApiBudget,
     DedupDecision,
+    FreeQueryQuota,
     MonitorCheckpoint,
     MonitorCycle,
     ResearchRun,
@@ -128,7 +136,45 @@ def _to_summary(run: ResearchRun) -> ResearchRunSummary:
 
 
 # ── Research runs ───────────────────────────────────────
-def record_research_run(state: dict[str, Any], *, thread_id: str, latency_ms: int) -> str:
+# The owner value on every row written before there was an owner column, and
+# on everything the CLI records — it has no identity to record. NOT NULL '',
+# never NULL, so every predicate below is a plain equality with no IS NULL
+# branch for anyone to forget. See ResearchRun.subject.
+LEGACY_SUBJECT = ""
+
+
+def _visible_owners(subject: str, *, unlimited: bool) -> list[str]:
+    """
+    The owner values this caller may see. THE visibility rule, in one place.
+
+    Everyone sees their own runs. The unlimited tier additionally sees the
+    unattributable ones — rows written before this column existed, and CLI
+    runs — because those belong to nobody and the operator is the only account
+    that can reasonably be handed them. Nothing is reassigned or deleted; the
+    rows simply become visible to the operator and to no one else.
+
+    Note what this is NOT: the unlimited tier does not see another *account's*
+    runs. It is own + unattributable, not everything.
+
+    ══ WHY A LIST RATHER THAN A PREDICATE ══
+      This is consumed in two evaluation contexts — as SQL (``subject.in_()``
+      in the listing) and in Python (``can_use_thread``, which must tell "no
+      row" apart from "not yours" and so cannot be a WHERE clause). A list is
+      the one shape both use, which keeps the rule from being written twice
+      and drifting apart.
+    """
+    if not subject:
+        # require_identity cannot produce this — it falls back to
+        # f"email:{email}" when a token somehow carries no `sub`. If it ever
+        # did, an empty subject would match every legacy row, which is the
+        # exact failure this whole module exists to prevent.
+        raise ValueError("a run owner must have a non-empty subject")
+    return [subject, LEGACY_SUBJECT] if unlimited else [subject]
+
+
+def record_research_run(
+    state: dict[str, Any], *, thread_id: str, subject: str, email: str = "", latency_ms: int
+) -> str:
     """
     Summarise one finished research run.
 
@@ -141,6 +187,12 @@ def record_research_run(state: dict[str, Any], *, thread_id: str, latency_ms: in
         The final ResearchState.
     thread_id : str
         Checkpoint thread id — the join key into the checkpointer.
+    subject : str
+        Who ran it. Keyword-only and with no default on purpose: every call
+        site must say whose run this is, so adding one cannot silently produce
+        an unattributed row.
+    email : str, optional
+        Denormalised label for whoever reads the table directly.
     latency_ms : int
         Wall-clock duration of the run.
 
@@ -157,7 +209,22 @@ def record_research_run(state: dict[str, Any], *, thread_id: str, latency_ms: in
         if run is None:
             run = ResearchRun(thread_id=thread_id)
             session.add(run)
+        elif run.subject not in (subject, LEGACY_SUBJECT):
+            # Unreachable through the API — _resolve_thread refuses a foreign
+            # thread id before the graph ever runs. Reached only by a race or
+            # a non-HTTP caller, and a query that already cost real money must
+            # not turn into a 500, so this drops the summary and shouts.
+            logger.error(
+                "Refusing to overwrite run %s (owned by another account) on behalf of %s",
+                thread_id,
+                subject,
+            )
+            return thread_id
 
+        # LEGACY_SUBJECT is in the tuple above so that re-asking something from
+        # before this column existed CLAIMS the old row rather than orphaning it.
+        run.subject = subject
+        run.owner_email = email or run.owner_email
         run.query = state.get("query", "")
         run.final_answer = state.get("final_answer") or state.get("draft_answer") or ""
         run.citation_coverage = float(report.get("citation_coverage", 0.0))
@@ -175,18 +242,58 @@ def record_research_run(state: dict[str, Any], *, thread_id: str, latency_ms: in
     return thread_id
 
 
-def list_research_runs(*, limit: int = 50) -> list[ResearchRunSummary]:
-    """Return recent runs, newest first."""
+def list_research_runs(*, subject: str, unlimited: bool, limit: int = 50) -> list[ResearchRunSummary]:
+    """Return this caller's recent runs, newest first."""
     with session_scope() as session:
-        rows = session.scalars(select(ResearchRun).order_by(ResearchRun.created_at.desc()).limit(limit)).all()
+        rows = session.scalars(
+            select(ResearchRun)
+            .where(ResearchRun.subject.in_(_visible_owners(subject, unlimited=unlimited)))
+            .order_by(ResearchRun.created_at.desc())
+            .limit(limit)
+        ).all()
         return [_to_summary(row) for row in rows]
 
 
-def get_research_run(thread_id: str) -> ResearchRunSummary | None:
-    """Return one run by thread id, or None."""
+def get_research_run(thread_id: str, *, subject: str, unlimited: bool) -> ResearchRunSummary | None:
+    """
+    Return one of this caller's runs by thread id, or None.
+
+    ``None`` means "no such run, as far as you are concerned". It deliberately
+    does not distinguish a run that does not exist from one that belongs to
+    somebody else, and callers must not try to — the difference is exactly
+    what an enumeration attack wants.
+    """
     with session_scope() as session:
-        run = session.scalar(select(ResearchRun).where(ResearchRun.thread_id == thread_id))
+        run = session.scalar(
+            select(ResearchRun).where(
+                ResearchRun.thread_id == thread_id,
+                ResearchRun.subject.in_(_visible_owners(subject, unlimited=unlimited)),
+            )
+        )
         return _to_summary(run) if run else None
+
+
+def can_use_thread(thread_id: str, *, subject: str, unlimited: bool) -> bool:
+    """
+    Whether this caller may read or append to a checkpoint thread.
+
+    ══ WHY THIS IS NOT `get_research_run(...) is not None` ══
+      The transcript lives in the CHECKPOINTER, whose tables are LangGraph's
+      and carry no identity at all — thread_id and nothing else. A row in
+      research_runs is therefore the only thing in the system that can say who
+      a thread belongs to.
+
+      Which makes the missing-row case the interesting one. A thread with no
+      row is not "denied", it is UNATTRIBUTABLE: a run that crashed before its
+      summary was written, a CLI run, a monitor cycle's thread. Those get
+      exactly the same treatment as a legacy row — the unlimited tier and
+      nobody else. That keeps it fail-closed, since a free account can never
+      reach a thread this table cannot vouch for.
+    """
+    with session_scope() as session:
+        owner = session.scalar(select(ResearchRun.subject).where(ResearchRun.thread_id == thread_id))
+
+    return (LEGACY_SUBJECT if owner is None else owner) in _visible_owners(subject, unlimited=unlimited)
 
 
 # ── API budgets ─────────────────────────────────────────
@@ -223,6 +330,137 @@ def record_api_call(provider: str, *, count: int = 1) -> int:
         logger.warning("Budget: %s at %d/%d calls today", provider, total, limit)
 
     return total
+
+
+# ── Free tier ───────────────────────────────────────────
+class FreeQuotaStatus(TypedDict):
+    """One account's lifetime free-query standing."""
+
+    subject: str
+    email: str
+    used: int
+    limit: int
+    remaining: int
+    exhausted: bool
+
+
+def _quota_status(subject: str, email: str, used: int, limit: int) -> FreeQuotaStatus:
+    """Derive the reportable view. ``remaining`` floors at zero — a lowered limit is not a debt."""
+    return FreeQuotaStatus(
+        subject=subject,
+        email=email,
+        used=used,
+        limit=limit,
+        remaining=max(0, limit - used),
+        exhausted=used >= limit,
+    )
+
+
+def get_free_quota(subject: str, *, limit: int) -> FreeQuotaStatus:
+    """
+    Report an account's standing without spending anything.
+
+    An account that has never queried has no row, and that is reported as
+    ``used=0`` rather than as an error — the row is created by the first
+    successful ``consume_free_query``, not by signing in.
+    """
+    with session_scope() as session:
+        row = session.scalar(select(FreeQueryQuota).where(FreeQueryQuota.subject == subject))
+        if row is None:
+            return _quota_status(subject, "", 0, limit)
+        return _quota_status(subject, row.email, row.used, limit)
+
+
+def consume_free_query(subject: str, *, limit: int, email: str = "") -> FreeQuotaStatus | None:
+    """
+    Atomically spend one lifetime free query.
+
+    ══ WHY A CONDITIONAL UPDATE AND NOT read-modify-write ══
+      record_api_call above selects, mutates and commits, and is racy — two
+      concurrent calls can lose an increment. There it is harmless: a soft
+      budget warning that fires one call late costs nothing. Here a lost
+      increment IS a free query, and the increment is the entire feature. So
+      the spend is a single statement whose WHERE clause carries the limit:
+
+          UPDATE ... SET used = used + 1 WHERE subject = ? AND used < ?
+
+      The database decides whether there was an allowance left, and rowcount
+      reports what it decided. Two requests racing on the last unit produce
+      exactly one rowcount of 1.
+
+    The row is only ever INSERTed with ``used=0``, never with 1, so the insert
+    path cannot itself spend a unit and the retry below is safe to repeat.
+
+    Parameters
+    ----------
+    subject : str
+        Google's ``sub`` claim. Never the email.
+    limit : int
+        The lifetime allowance. ``0`` refuses everything.
+    email : str, optional
+        Stored as a label for the operator, and refreshed on every spend.
+
+    Returns
+    -------
+    FreeQuotaStatus | None
+        The new standing, or ``None`` when the allowance is already spent.
+    """
+    if limit <= 0:
+        return None
+
+    # Two passes at most: the first can miss because the row does not exist
+    # yet, and the second runs after it has been created.
+    for _ in range(2):
+        with session_scope() as session:
+            spent = session.execute(
+                update(FreeQueryQuota)
+                .where(FreeQueryQuota.subject == subject, FreeQueryQuota.used < limit)
+                .values(
+                    used=FreeQueryQuota.used + 1,
+                    # Keep the label current without ever letting it become the
+                    # key: an account that changed address stays one row.
+                    email=email or FreeQueryQuota.email,
+                    updated_at=utcnow(),
+                )
+                .execution_options(synchronize_session=False)
+            ).rowcount
+
+            if spent == 1:
+                row = session.scalar(select(FreeQueryQuota).where(FreeQueryQuota.subject == subject))
+                # Built inside the scope: the row is detached once it exits.
+                return _quota_status(subject, row.email if row else email, row.used if row else limit, limit)
+
+            exists = session.scalar(select(FreeQueryQuota.id).where(FreeQueryQuota.subject == subject)) is not None
+
+        if exists:
+            return None  # The row is there and at its limit. Genuinely exhausted.
+
+        try:
+            with session_scope() as session:
+                session.add(FreeQueryQuota(subject=subject, email=email, used=0))
+        except IntegrityError:
+            # A concurrent first request won the insert. The unique index on
+            # `subject` is what turns that race into this exception rather than
+            # into two rows and two allowances.
+            logger.debug("Quota row for %s was created concurrently; retrying the spend", subject)
+
+    return None
+
+
+def refund_free_query(subject: str) -> None:
+    """
+    Return one unit to an account whose query never produced an answer.
+
+    The ``used > 0`` predicate is a floor, not an optimisation: a double
+    refund must not mint credit that was never spent.
+    """
+    with session_scope() as session:
+        session.execute(
+            update(FreeQueryQuota)
+            .where(FreeQueryQuota.subject == subject, FreeQueryQuota.used > 0)
+            .values(used=FreeQueryQuota.used - 1, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
 
 
 def get_budget_status() -> list[BudgetStatus]:

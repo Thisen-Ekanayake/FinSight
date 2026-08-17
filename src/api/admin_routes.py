@@ -7,8 +7,8 @@
 #
 # Routes:
 #   GET /health          liveness and per-dependency status        (PUBLIC)
-#   GET /admin/budgets   today's API usage against each daily allowance
-#   GET /admin/config    effective configuration, secrets excluded
+#   GET /admin/budgets   today's API usage                (UNLIMITED TIER ONLY)
+#   GET /admin/config    effective configuration          (UNLIMITED TIER ONLY)
 #
 # ══ /health IS PUBLIC AND MUST STAY THAT WAY ══
 #   docker-compose.yml probes it to decide service_healthy, and the web
@@ -16,6 +16,12 @@
 #   the api container permanently unhealthy and the frontend never starts.
 #   This is why the two /admin routes carry their own Depends rather than the
 #   router taking a blanket one in create_app().
+#
+# ══ WHY THE ADMIN ROUTES NEED require_unlimited_user ══
+#   require_user now admits any verified Google account, because the free tier
+#   sells queries to strangers. These two routes report the deployment's own
+#   spend and configuration, which is the operator's business and nobody
+#   else's — so they ask for the unlimited tier by name.
 #
 # ══ /config NEVER RETURNS A SECRET ══
 #   An endpoint whose job is to report configuration is the single easiest
@@ -35,7 +41,7 @@ import logging
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 
-from src.api.auth import require_user
+from src.api.auth import require_unlimited_user
 from src.api.schemas import BudgetOut, ConfigOut, HealthResponse
 from src.core import config as core_config
 from src.core.tracing import is_tracing_enabled
@@ -142,7 +148,7 @@ async def health(request: Request) -> HealthResponse:
     "/admin/budgets",
     response_model=list[BudgetOut],
     summary="Today's API usage",
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_unlimited_user)],
 )
 async def budgets() -> list[BudgetOut]:
     """
@@ -159,7 +165,7 @@ async def budgets() -> list[BudgetOut]:
     "/admin/config",
     response_model=ConfigOut,
     summary="Effective configuration",
-    dependencies=[Depends(require_user)],
+    dependencies=[Depends(require_unlimited_user)],
 )
 async def effective_config() -> ConfigOut:
     """

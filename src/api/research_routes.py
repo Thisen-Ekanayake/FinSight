@@ -10,11 +10,28 @@
 #   GET  /research/threads/{thread_id} replay a run's audit trail
 #   GET  /research/runs                recent runs
 #
+# ══ HISTORY IS PER ACCOUNT ══
+#   A question, its answer and the thread id that replays it belong to whoever
+#   asked. /runs lists only the caller's; /threads/{id} refuses anyone else's.
+#   The refusal is a 404 with the same wording an unknown thread gets, so the
+#   endpoint is not an oracle for which ids exist.
+#
+#   The checkpointer cannot help enforce this — it has no identity, only
+#   thread ids — so research_runs.subject is the only record of ownership and
+#   can_use_thread is the only gate. See _resolve_thread for the matching
+#   rule on the write side.
+#
 # ══ THE AUDIT TRAIL IS REPLAYED, NOT LOGGED ══
 #   /threads/{id} reads the checkpointer's state history — the actual
 #   intermediate states the graph passed through, recovered from disk. It is
 #   not a log written alongside the run, so it cannot drift from what happened
 #   and it survives the process that produced it.
+#
+# ══ THE TWO QUERY ROUTES ARE THE ONLY METERED ONES ══
+#   They are what costs real money — several LLM calls and a fan-out of data
+#   -source requests each. Replaying a thread or listing runs is a SQLite read,
+#   so a free account keeps full use of the dashboard and only the expensive
+#   verb is counted. See src/api/quota.py.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -28,11 +45,14 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
+from src.api.auth import CurrentIdentity, Identity
+from src.api.quota import charge_query, refund_query
 from src.api.schemas import (
     CitationOut,
     ConflictOut,
     QueryRequest,
     QueryResponse,
+    QuotaExceededBody,
     RunSummaryOut,
     SeriesPointOut,
     ThreadResponse,
@@ -43,6 +63,7 @@ from src.api.schemas import (
 )
 from src.persistence.repository import (
     ResearchRunSummary,
+    can_use_thread,
     get_research_run,
     list_research_runs,
     record_research_run,
@@ -82,6 +103,36 @@ def _new_thread_id() -> str:
     guess what the other's ids look like.
     """
     return f"research:{uuid.uuid4().hex[:16]}"
+
+
+def _resolve_thread(requested: str | None, identity: Identity) -> str:
+    """
+    Turn a client-supplied thread id into one this caller may write to.
+
+    ══ THE HOLE THIS CLOSES ══
+      thread_id arrives in the request BODY. Before this, supplying somebody
+      else's appended to THEIR checkpoint history and overwrote THEIR
+      research_runs row in place — a write primitive against another account,
+      reachable by anyone who had read /research/runs once while it was still
+      global. Scoping the reads without this would be theatre: hijack the row,
+      become its owner, then read the transcript back through the front door.
+
+      So a supplied id must already resolve to a thread this caller can see.
+      Minting a new one is the SERVER's job — omit the field and get one.
+      Nothing that ships sends this field, so the rule costs nothing today.
+
+    404 rather than 403, with the same detail an unknown thread gets: a 403
+    would confirm the id exists and belongs to someone else, and there is
+    nothing a legitimate caller could do with that.
+    """
+    if not requested:
+        return _new_thread_id()
+
+    if not can_use_thread(requested, subject=identity.subject, unlimited=identity.unlimited):
+        logger.info("Refused thread %s for %s — not theirs", requested, identity.email)
+        raise HTTPException(status_code=404, detail=f"No checkpoint history for thread {requested!r}")
+
+    return requested
 
 
 def _verification_out(report: dict[str, Any]) -> VerificationOut:
@@ -197,8 +248,13 @@ def _to_response(state: dict[str, Any], *, thread_id: str, latency_ms: int) -> Q
     )
 
 
-@router.post("/query", response_model=QueryResponse, summary="Ask a research question")
-async def run_query(request: Request, body: QueryRequest) -> QueryResponse:
+@router.post(
+    "/query",
+    response_model=QueryResponse,
+    responses={402: {"model": QuotaExceededBody, "description": "Free queries exhausted"}},
+    summary="Ask a research question",
+)
+async def run_query(request: Request, body: QueryRequest, identity: CurrentIdentity) -> QueryResponse:
     """
     Run one research query end to end and return the verified answer.
 
@@ -206,9 +262,24 @@ async def run_query(request: Request, body: QueryRequest) -> QueryResponse:
     verification, and up to one repair pass all complete before the response.
     Expect tens of seconds — the graph makes several real LLM and data-source
     calls. Use ``/query/stream`` to watch it progress.
+
+    Costs one free query for an account outside the unlimited tier, refunded
+    if the run fails.
     """
+    # ══ WHY THE CHARGE IS HERE AND NOT IN A Depends ══
+    #   FastAPI resolves dependencies BEFORE it validates the request body, so
+    #   a Depends(charge_query) would bill a query that then 422s on
+    #   QueryRequest's min_length. Charging in the handler puts the meter after
+    #   validation. And it goes after _graph(), because a 503 from a lifespan
+    #   that never ran is our failure, not a purchase.
+    #
+    #   _resolve_thread goes BEFORE the meter for the same reason: a refused
+    #   thread id is the caller's mistake and the graph never runs, so a free
+    #   account must not be billed for it.
     graph = _graph(request)
-    thread_id = body.thread_id or _new_thread_id()
+    thread_id = _resolve_thread(body.thread_id, identity)
+    charge_query(identity)
+
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
 
     started = time.monotonic()
@@ -216,10 +287,17 @@ async def run_query(request: Request, body: QueryRequest) -> QueryResponse:
         state = await graph.ainvoke(new_state(body.query, thread_id=thread_id), config=config)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Research query failed: %s", body.query)
+        refund_query(identity)
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
 
     latency_ms = int((time.monotonic() - started) * 1000)
-    record_research_run(state, thread_id=thread_id, latency_ms=latency_ms)
+    record_research_run(
+        state,
+        thread_id=thread_id,
+        subject=identity.subject,
+        email=identity.email,
+        latency_ms=latency_ms,
+    )
 
     return _to_response(state, thread_id=thread_id, latency_ms=latency_ms)
 
@@ -229,7 +307,7 @@ def _sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
 
 
-async def _stream_events(graph: Any, query: str, thread_id: str) -> AsyncIterator[str]:
+async def _stream_events(graph: Any, query: str, thread_id: str, *, identity: Identity) -> AsyncIterator[str]:
     """
     Yield SSE frames as the graph runs.
 
@@ -269,28 +347,58 @@ async def _stream_events(graph: Any, query: str, thread_id: str) -> AsyncIterato
                 )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Streamed research query failed: %s", query)
+        # Only reached for a real failure. A client that abandons the stream
+        # raises CancelledError, which is not an Exception subclass here and
+        # so is deliberately NOT refunded — Ask.tsx aborts on every resubmit,
+        # and refunding that would make retyping free forever.
+        refund_query(identity)
         yield _sse("error", {"detail": f"{type(exc).__name__}: {exc}"})
         return
 
     latency_ms = int((time.monotonic() - started) * 1000)
-    record_research_run(final, thread_id=thread_id, latency_ms=latency_ms)
+    record_research_run(
+        final,
+        thread_id=thread_id,
+        subject=identity.subject,
+        email=identity.email,
+        latency_ms=latency_ms,
+    )
     yield _sse("final", _to_response(final, thread_id=thread_id, latency_ms=latency_ms).model_dump())
 
 
-@router.post("/query/stream", summary="Ask a research question, streamed")
-async def run_query_stream(request: Request, body: QueryRequest) -> StreamingResponse:
+@router.post(
+    "/query/stream",
+    responses={402: {"model": QuotaExceededBody, "description": "Free queries exhausted"}},
+    summary="Ask a research question, streamed",
+)
+async def run_query_stream(request: Request, body: QueryRequest, identity: CurrentIdentity) -> StreamingResponse:
     """
     Run a query and stream node-by-node progress as Server-Sent Events.
 
     Frames: ``start``, one ``node`` per completed node, then ``final`` (or
     ``error``). The node frames are what make a four-branch fan-out legible
     while it is happening rather than after.
+
+    Costs one free query for an account outside the unlimited tier, refunded
+    if the run fails.
     """
     graph = _graph(request)
-    thread_id = body.thread_id or _new_thread_id()
+
+    # ══ BOTH OF THESE MUST HAPPEN HERE, NOT IN THE GENERATOR ══
+    #   _stream_events does not run until the response body is being written,
+    #   by which point the status line is already 200 and the only way to
+    #   report a refusal is an `error` frame — indistinguishable to the client
+    #   from a graph crash, and invisible to anything that checks status codes.
+    #   Raising before StreamingResponse is constructed is what makes an
+    #   exhausted account get a real 402 and a hijacked thread a real 404.
+    #
+    #   Order matters between them too: refusing a foreign thread must not
+    #   cost the caller a query.
+    thread_id = _resolve_thread(body.thread_id, identity)
+    charge_query(identity)
 
     return StreamingResponse(
-        _stream_events(graph, body.query, thread_id),
+        _stream_events(graph, body.query, thread_id, identity=identity),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -333,9 +441,9 @@ def _summary_out(summary: ResearchRunSummary) -> RunSummaryOut:
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadResponse, summary="Replay a run's audit trail")
-async def get_thread(request: Request, thread_id: str) -> ThreadResponse:
+async def get_thread(request: Request, thread_id: str, identity: CurrentIdentity) -> ThreadResponse:
     """
-    Replay every superstep the graph passed through for one thread.
+    Replay every superstep the graph passed through for one of your threads.
 
     Read back from the checkpointer, so this is what actually happened rather
     than what a logger recorded at the time. Each step names the nodes that
@@ -343,6 +451,20 @@ async def get_thread(request: Request, thread_id: str) -> ThreadResponse:
     the clearest evidence the branches really did run together.
     """
     graph = _graph(request)
+
+    # ══ THE CHECKPOINTER CANNOT DO THIS FOR US ══
+    #   Its tables are LangGraph's, keyed by thread_id alone with no identity
+    #   anywhere in them. An owner column on research_runs secures the
+    #   LISTING; only this check secures the TRANSCRIPT — and it has to happen
+    #   before aget_state_history rather than after, because by then the
+    #   question text and the full answer are already in hand.
+    if not can_use_thread(thread_id, subject=identity.subject, unlimited=identity.unlimited):
+        logger.info("Refused thread %s for %s — not theirs", thread_id, identity.email)
+        # Same status and byte-identical detail to the unknown-thread 404
+        # below. A 403 here would confirm the thread exists, which is the one
+        # fact worth withholding.
+        raise HTTPException(status_code=404, detail=f"No checkpoint history for thread {thread_id!r}")
+
     config = {"configurable": {"thread_id": thread_id}}
 
     snapshots = [snapshot async for snapshot in graph.aget_state_history(config)]
@@ -377,7 +499,7 @@ async def get_thread(request: Request, thread_id: str) -> ThreadResponse:
 
     latest = snapshots[-1].values or {}
     report = latest.get("verification")
-    summary = get_research_run(thread_id)
+    summary = get_research_run(thread_id, subject=identity.subject, unlimited=identity.unlimited)
 
     return ThreadResponse(
         thread_id=thread_id,
@@ -390,7 +512,15 @@ async def get_thread(request: Request, thread_id: str) -> ThreadResponse:
     )
 
 
-@router.get("/runs", response_model=list[RunSummaryOut], summary="List recent runs")
-async def list_runs(limit: int = Query(default=50, ge=1, le=200)) -> list[RunSummaryOut]:
-    """Return recent research runs, newest first."""
-    return [_summary_out(summary) for summary in list_research_runs(limit=limit)]
+@router.get("/runs", response_model=list[RunSummaryOut], summary="List your recent runs")
+async def list_runs(identity: CurrentIdentity, limit: int = Query(default=50, ge=1, le=200)) -> list[RunSummaryOut]:
+    """
+    Return this account's recent research runs, newest first.
+
+    Scoped to the caller: a question, its answer, and the thread id that
+    replays it are all one account's business.
+    """
+    return [
+        _summary_out(summary)
+        for summary in list_research_runs(subject=identity.subject, unlimited=identity.unlimited, limit=limit)
+    ]

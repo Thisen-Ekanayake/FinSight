@@ -128,10 +128,35 @@ def _parse_emails(raw: str) -> frozenset[str]:
     return frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
 
 
-# Authentication proves WHO is calling; this decides whether they may. A
-# verified Google account not named here is a 403, not a 401 — the sign-in
-# worked, the account simply is not permitted.
+# Authentication proves WHO is calling; this decides how much they get. These
+# addresses are the UNLIMITED tier: they skip the free-query counter entirely.
+#
+# ══ THIS USED TO BE AN ADMISSION LIST ══
+#   It was once the whole authorisation model — a verified account not named
+#   here got a 403 and nothing else. It is not that any more. Any verified
+#   Google account may now sign in and spend FREE_QUERY_LIMIT queries; naming
+#   an address here only exempts it from that meter. Routes that spend
+#   unbounded money or disclose configuration still require membership, via
+#   require_unlimited_user in src/api/auth.py.
 AUTH_ALLOWED_EMAILS: frozenset[str] = _parse_emails(os.getenv("AUTH_ALLOWED_EMAILS", ""))
+
+# How many research queries a signed-in account outside the unlimited tier may
+# run, EVER. Lifetime, not per day or per month: there is no reset job and no
+# period column, so a counter that has reached the limit stays there until the
+# row is edited by hand.
+#
+# 0 is meaningful and restores the old behaviour — only the unlimited tier can
+# query — except the refusal is a 402 carrying a CTA rather than a bare 403.
+#
+# The limit is NOT frozen onto each row. Raising it later grants the extra
+# queries to every existing account; lowering it below what someone has already
+# spent leaves them exhausted rather than in debt.
+FREE_QUERY_LIMIT: int = int(os.getenv("FREE_QUERY_LIMIT", "5"))
+
+# Where an exhausted account is sent to ask for more. Served in the 402 body
+# and by GET /auth/quota rather than hardcoded in the bundle, so a fork or a
+# private deployment can point it at its own contact route without a rebuild.
+CONTACT_URL: str = os.getenv("CONTACT_URL", "https://github.com/Thisen-Ekanayake/FinSight")
 
 # Extra browser origins allowed to call this API. Empty by default, which means
 # same-origin only — the shipped topology serves the bundle and proxies /api
@@ -231,24 +256,33 @@ def validate_auth_config() -> None:
     Check that authentication, if switched on, is actually configured.
 
     Deliberately fatal rather than a warning, for the same reason
-    ``QdrantIsolationError`` aborts startup in src/api/main.py: a
-    half-configured allowlist fails in one of two directions and both are
-    unacceptable. An empty ``AUTH_ALLOWED_EMAILS`` locks every account out of
-    an API that looks like it booted fine, and a missing client ID means no
-    token can ever be verified. Neither should be discovered through a 403 an
-    hour later.
+    ``QdrantIsolationError`` aborts startup in src/api/main.py: a missing
+    client ID means no token can ever be verified, and that should not be
+    discovered through a 401 an hour later.
+
+    An empty ``AUTH_ALLOWED_EMAILS`` is NO LONGER fatal. It used to lock every
+    account out; now it only means nobody is exempt from the free-query meter,
+    which is a legitimate — if rarely intended — configuration. So it warns.
 
     Does nothing when ``AUTH_ENABLED`` is false, beyond warning if that looks
-    like a mistake in production.
+    like a mistake in production. ``FREE_QUERY_LIMIT`` is checked in both
+    modes, because a negative allowance is a typo in any deployment.
 
     Raises
     ------
     ConfigurationError
-        If AUTH_ENABLED is set but the client ID or the allowlist is empty.
+        If FREE_QUERY_LIMIT is negative, or AUTH_ENABLED is set with no client ID.
     """
     import logging
 
     from src.core.errors import ConfigurationError
+
+    if FREE_QUERY_LIMIT < 0:
+        raise ConfigurationError(
+            f"FREE_QUERY_LIMIT={FREE_QUERY_LIMIT} is negative.\n"
+            "  Set it to the number of lifetime queries a free account may run, "
+            "or 0 to allow only AUTH_ALLOWED_EMAILS to query."
+        )
 
     if not AUTH_ENABLED:
         if IS_PRODUCTION:
@@ -268,9 +302,14 @@ def validate_auth_config() -> None:
         )
 
     if not AUTH_ALLOWED_EMAILS:
-        raise ConfigurationError(
-            "AUTH_ENABLED=true but AUTH_ALLOWED_EMAILS is empty — every account would be refused.\n"
-            "  Set it to a comma-separated list of the Google addresses allowed in."
+        # Not fatal any more, but almost never deliberate: it means the
+        # operator's own account is metered at FREE_QUERY_LIMIT like everyone
+        # else, and that nobody can reach the monitor or admin routes.
+        logging.getLogger(__name__).warning(
+            "AUTH_ENABLED=true but AUTH_ALLOWED_EMAILS is empty — every account, including "
+            "yours, is capped at FREE_QUERY_LIMIT=%d queries, and the monitor and admin "
+            "routes are reachable by nobody. Set it to your own address at least.",
+            FREE_QUERY_LIMIT,
         )
 
 

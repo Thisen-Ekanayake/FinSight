@@ -2,22 +2,33 @@
 # FinSight — Authentication
 # ═══════════════════════════════════════════════════════
 #
-# Purpose : Turn a Google ID token into an email address this deployment is
-#           willing to serve, or refuse the request.
+# Purpose : Turn a Google ID token into an identity this deployment will serve,
+#           and say which tier that identity is in.
 #
 # Public API:
-#   require_user        FastAPI dependency -> the caller's email
-#   CurrentUser         Annotated alias for route signatures
+#   Identity                who is calling, and whether they are metered
+#   require_identity        FastAPI dependency -> Identity
+#   require_user            FastAPI dependency -> the caller's email
+#   require_unlimited_user  FastAPI dependency -> email, 403 unless unlimited
+#   CurrentIdentity / CurrentUser   Annotated aliases for route signatures
 #   verify_google_id_token(token) -> claims
-#   ANONYMOUS_USER      the identity used when AUTH_ENABLED is false
+#   ANONYMOUS_USER          the identity used when AUTH_ENABLED is false
 #   reset_token_cache()
 #
 # ══ AUTHENTICATION AND AUTHORISATION ARE SEPARATE HERE ══
-#   A valid Google token proves who is calling. It says nothing about whether
-#   they may call THIS deployment — anyone with a Google account can obtain
-#   one. So a token that verifies but whose address is not in
-#   AUTH_ALLOWED_EMAILS is a 403, not a 401: signing in again cannot help, and
-#   a 401 would send the dashboard into a re-login loop trying.
+#   A valid Google token proves who is calling. It says nothing about how much
+#   of this deployment they get — anyone with a Google account can obtain one.
+#   So this module answers two questions, and the status codes follow:
+#
+#     401  no usable credential. Signing in again fixes it.
+#     402  a free account that has spent its FREE_QUERY_LIMIT queries. Raised
+#          in src/api/quota.py, not here, but it is the reason require_identity
+#          reports `unlimited` instead of just refusing.
+#     403  a free account touching a route reserved for the unlimited tier.
+#          Signing in again cannot help, which is why it is not a 401.
+#
+#   AUTH_ALLOWED_EMAILS used to be an admission list and is now the unlimited
+#   tier. A verified stranger is admitted and metered, not refused.
 #
 # ══ WHAT THIS MODULE DOES NOT CHECK ══
 #   Signature, expiry, audience and issuer are all verify_oauth2_token's job —
@@ -41,6 +52,7 @@ import hashlib
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, status
@@ -197,26 +209,48 @@ def verify_google_id_token(token: str) -> dict[str, Any]:
     return claims
 
 
-def require_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None,
-) -> str:
+@dataclass(frozen=True, slots=True)
+class Identity:
     """
-    Resolve the caller's email, or refuse the request.
+    Who is calling, and which tier they are in.
+
+    ``subject`` is Google's ``sub`` claim, not the email. A Google account can
+    change its address; a quota keyed by email would reset when it did, which
+    is precisely the failure the counter exists to prevent. The email is
+    carried alongside for display, logs and the unlimited-tier match — never
+    as the key.
+    """
+
+    subject: str
+    email: str
+    unlimited: bool
+
+
+def require_identity(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None,
+) -> Identity:
+    """
+    Resolve the caller, or refuse the request.
+
+    Admits any Google account with a verified email. Deciding how much that
+    account gets is the caller's job — see ``unlimited``, and src/api/quota.py.
 
     Returns
     -------
-    str
-        The verified, allowlisted email — or ``ANONYMOUS_USER`` when
+    Identity
+        The verified caller — or an unlimited ``ANONYMOUS_USER`` when
         ``AUTH_ENABLED`` is false.
 
     Raises
     ------
     HTTPException
-        401 when no usable credential was presented; 403 when a valid Google
-        account is simply not on this deployment's allowlist.
+        401 when no usable credential was presented. Never 403: an
+        authenticated stranger is a customer, not an intruder.
     """
     if not core_config.AUTH_ENABLED:
-        return ANONYMOUS_USER
+        # Unlimited, not merely admitted. Every CLI, eval and test runs through
+        # here with auth off, and none of them may ever touch the meter.
+        return Identity(subject=ANONYMOUS_USER, email=ANONYMOUS_USER, unlimited=True)
 
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -239,17 +273,61 @@ def require_user(
         ) from exc
 
     email = str(claims["email"])
-    if email not in core_config.AUTH_ALLOWED_EMAILS:
-        # 403, not 401. The sign-in worked; retrying it cannot change the
-        # outcome, and a 401 would send the dashboard round a re-login loop.
-        logger.warning("Refused %s — authenticated but not on AUTH_ALLOWED_EMAILS", email)
+
+    # A Google ID token always carries `sub`. The fallback exists so that the
+    # quota layer is never handed an empty key — which would collapse every
+    # such caller onto one shared counter — and it is loud because a token
+    # without `sub` did not come from where we think it did.
+    subject = str(claims.get("sub") or "").strip()
+    if not subject:
+        logger.warning("Token for %s carries no 'sub' claim; keying quota by email instead", email)
+        subject = f"email:{email}"
+
+    return Identity(
+        subject=subject,
+        email=email,
+        unlimited=email in core_config.AUTH_ALLOWED_EMAILS,
+    )
+
+
+def require_user(identity: Annotated[Identity, Depends(require_identity)]) -> str:
+    """
+    Resolve the caller's email.
+
+    Kept as its own dependency because that is what the router-level guard in
+    src/api/main.py declares, and what the admin routes ask for by name. It is
+    now one field of a larger answer rather than the whole of it.
+    """
+    return identity.email
+
+
+def require_unlimited_user(identity: Annotated[Identity, Depends(require_identity)]) -> str:
+    """
+    Resolve the caller's email, refusing anyone outside the unlimited tier.
+
+    ══ WHY SOME ROUTES STILL NEED AN ALLOWLIST ══
+      The free tier sells research queries, and those are metered. Nothing
+      meters ``POST /monitor/cycles``, which runs a full monitoring cycle and
+      spends real LLM tokens per watched ticker, or ``/monitor/cycles/{id}/
+      resume``, which DISPATCHES an alert. ``GET /admin/config`` publishes the
+      effective configuration. Opening sign-in to the world without this would
+      hand all three to anyone with a Google account.
+
+    403, not 401: the sign-in worked, and repeating it cannot change the
+    outcome. The frontend deliberately does not bounce a 403 to the sign-in
+    screen for exactly that reason.
+    """
+    if not identity.unlimited:
+        logger.warning("Refused %s — authenticated but not on AUTH_ALLOWED_EMAILS", identity.email)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{email} is not permitted on this deployment.",
+            detail=f"{identity.email} is not permitted to do that on this deployment.",
         )
-
-    return email
+    return identity.email
 
 
 # For routes that want the caller: `def route(user: CurrentUser) -> ...`.
 CurrentUser = Annotated[str, Depends(require_user)]
+
+# For routes that need the tier too — the metered ones.
+CurrentIdentity = Annotated[Identity, Depends(require_identity)]

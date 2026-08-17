@@ -35,6 +35,8 @@ import type {
   Decisions,
   Health,
   QueryResponse,
+  Quota,
+  QuotaExceeded,
   RunSummary,
   StreamEvent,
   ThreadResponse,
@@ -51,6 +53,21 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+  }
+}
+
+/**
+ * The free allowance is spent. A subclass of ApiError on purpose: a view that
+ * has not been taught about the free tier still shows something sensible,
+ * while one that has can narrow on `instanceof` and render the upgrade path.
+ */
+export class QuotaError extends ApiError {
+  readonly quota: QuotaExceeded;
+
+  constructor(quota: QuotaExceeded) {
+    super(quota.message, 402);
+    this.name = 'QuotaError';
+    this.quota = quota;
   }
 }
 
@@ -91,14 +108,34 @@ function authHeaders(): Record<string, string> {
  * Handle a 401 once, centrally.
  *
  * 401 means the token is missing, expired or invalid — all recoverable by
- * signing in again. 403 deliberately does NOT come through here: it means the
- * account is verified but not on this deployment's allowlist, so bouncing to
- * the sign-in screen would loop against a wall it can never get past.
+ * signing in again. Two other statuses deliberately do NOT come through here,
+ * because signing in again cannot fix either and bouncing to the sign-in
+ * screen would loop against a wall:
+ *
+ *   403  verified, but this route is reserved for the unlimited tier
+ *   402  verified, but the free queries are spent — the view renders a CTA
  */
 function handleUnauthorized(status: number): void {
   if (status !== 401) return;
   authToken = null;
   onUnauthorized?.();
+}
+
+/**
+ * A 402 whose body is the structured quota object, or null for anything else.
+ *
+ * Both fetch sites call this before falling back to a plain ApiError, so an
+ * exhausted account produces the same typed failure whether the view used
+ * `ask` or `askStream`.
+ */
+function quotaFrom(status: number, raw: string): QuotaExceeded | null {
+  if (status !== 402) return null;
+  try {
+    const detail = (JSON.parse(raw) as { detail?: QuotaExceeded }).detail;
+    return detail?.error === 'free_quota_exhausted' ? detail : null;
+  } catch {
+    return null;
+  }
 }
 
 type Query = Record<string, string | number | boolean | undefined | null>;
@@ -142,9 +179,21 @@ async function request<T>(
 
   if (!response.ok) {
     handleUnauthorized(response.status);
-    let detail = await response.text();
+
+    // Read the body ONCE — it is a stream, and a second .text() would throw.
+    const raw = await response.text();
+
+    const quota = quotaFrom(response.status, raw);
+    if (quota) throw new QuotaError(quota);
+
+    let detail = raw;
     try {
-      detail = (JSON.parse(detail) as { detail?: string }).detail ?? detail;
+      const parsed = (JSON.parse(raw) as { detail?: unknown }).detail;
+      // `detail` is not always a string: 422 carries an array of validation
+      // errors. Interpolating one gives "[object Object]", so anything that is
+      // not a string falls back to the raw body, which at least says what went
+      // wrong.
+      if (typeof parsed === 'string') detail = parsed;
     } catch {
       /* a non-JSON error body is still the best message available */
     }
@@ -197,7 +246,15 @@ export async function askStream(
 
   if (!response.ok || !response.body) {
     handleUnauthorized(response.status);
-    throw new ApiError(`POST /research/query/stream -> ${response.status}: ${await response.text()}`, response.status);
+    const raw = await response.text();
+
+    // The stream route refuses an exhausted account with a real 402 before it
+    // starts streaming (see run_query_stream). Without this branch that body
+    // would reach the user as a raw JSON blob in an error box.
+    const quota = quotaFrom(response.status, raw);
+    if (quota) throw new QuotaError(quota);
+
+    throw new ApiError(`POST /research/query/stream -> ${response.status}: ${raw}`, response.status);
   }
 
   const reader = response.body.getReader();
@@ -336,6 +393,17 @@ export async function removeTicker(ticker: string): Promise<true> {
  */
 export function authConfig(): Promise<AuthConfig> {
   return request<AuthConfig>('GET', '/auth/config');
+}
+
+/**
+ * How many free queries this account has left.
+ *
+ * Read before asking rather than discovered by hitting a 402: the last free
+ * query and the first refused one are indistinguishable until it is too late
+ * to choose differently.
+ */
+export function quota(): Promise<Quota> {
+  return request<Quota>('GET', '/auth/quota');
 }
 
 // ── Admin ───────────────────────────────────────────────

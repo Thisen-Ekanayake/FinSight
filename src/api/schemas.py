@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -36,7 +38,11 @@ class QueryRequest(BaseModel):
     thread_id: str | None = Field(
         default=None,
         max_length=64,
-        description="Reuse an existing checkpoint thread. Omit to start a new one.",
+        description=(
+            "Reuse one of YOUR OWN existing checkpoint threads. Omit to start a new one — "
+            "new ids are minted by the server and never accepted from a client. Naming a "
+            "thread that is not yours is a 404."
+        ),
     )
 
 
@@ -199,6 +205,45 @@ class AuthConfigOut(BaseModel):
 
     enabled: bool
     client_id: str
+
+
+class QuotaOut(BaseModel):
+    """
+    This account's free-query standing, so the UI can say so before spending one.
+
+    ``metered`` is false for the unlimited tier and whenever auth is off; the
+    other counts are meaningless in that case and the dashboard hides them
+    rather than rendering "5 of 5 left" to someone who has no limit.
+    """
+
+    metered: bool
+    used: int
+    limit: int
+    remaining: int
+    contact_url: str
+
+
+class QuotaExceededOut(BaseModel):
+    """
+    The body of a 402.
+
+    Machine-readable on purpose: the browser renders a call to action from
+    this, not a message. A bare string would force the frontend to pattern
+    -match prose to decide whether to show the upgrade panel.
+    """
+
+    error: Literal["free_quota_exhausted"] = "free_quota_exhausted"
+    message: str
+    used: int
+    limit: int
+    remaining: int = 0
+    contact_url: str
+
+
+class QuotaExceededBody(BaseModel):
+    """How the above actually arrives — FastAPI nests HTTPException.detail. For the OpenAPI schema."""
+
+    detail: QuotaExceededOut
 
 
 # ── Admin ───────────────────────────────────────────────

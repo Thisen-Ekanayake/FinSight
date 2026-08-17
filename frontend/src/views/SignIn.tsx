@@ -5,10 +5,14 @@
 // Shown instead of the dashboard while auth is on and no token is held.
 //
 // ══ WHY IT EXPLAINS ITSELF ══
-//   This is a single-operator tool with an allowlist, so most people who ever
-//   reach this screen cannot get past it. Saying so here — rather than letting
-//   them sign in and meet an unexplained 403 — is the difference between a
-//   closed door and a broken one.
+//   Anyone with a Google account can get past this screen now, and gets a
+//   small fixed number of questions once they do. Saying so here — rather
+//   than letting someone spend their allowance discovering it existed — is
+//   what makes the limit a stated offer instead of an ambush.
+//
+//   It said the opposite until the free tier landed: the allowlist used to
+//   decide admission, so this copy warned that signing in would probably
+//   still be refused. That is no longer true of any Google account.
 // ═══════════════════════════════════════════════════════
 
 import { useCallback } from 'react';
@@ -45,9 +49,9 @@ export function SignIn({ auth }: { auth: Auth }) {
         </h1>
 
         <p className="mono" style={{ fontSize: 12.5, lineHeight: 1.7, color: 'var(--ink-70)', margin: '0 0 22px' }}>
-          Every question costs real model quota, and approving a HIGH-severity alert dispatches it. Both are
-          recorded against the account that did them, so this deployment serves a fixed list of addresses
-          rather than anyone with the link.
+          Sign in with any Google account to try it. Every question runs a full multi-agent research pass
+          against live sources, so a new account gets a small fixed number of them — the dashboard, the
+          findings and the audit trail stay open either way.
         </p>
 
         {auth.status === 'error' ? (
@@ -61,8 +65,8 @@ export function SignIn({ auth }: { auth: Auth }) {
         <div ref={attach} style={{ display: 'flex', justifyContent: 'flex-start', minHeight: 44 }} />
 
         <p className="mono" style={{ fontSize: 11.5, lineHeight: 1.65, color: 'var(--ink-42)', margin: '22px 0 0' }}>
-          Not on the list? Signing in will succeed and still be refused — the account is verified, it is simply
-          not permitted here.
+          Google tells this deployment your email address and nothing else. Running the monitoring side, which
+          dispatches alerts, stays with the operator.
         </p>
       </Blueprint>
     </div>

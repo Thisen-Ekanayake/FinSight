@@ -41,6 +41,16 @@ SQLITE_CONNECT_ARGS: dict[str, object] = {"check_same_thread": False}
 # Research runs are an audit trail, not a cache; they stay long enough to be
 # useful and not so long that a demo database becomes a data-retention
 # question.
+#
+# ══ READ THIS BEFORE WRITING THE SWEEP ══
+#   No sweep exists yet, and whoever writes one needs to know that a
+#   research_runs row is the ONLY record of who owns a checkpoint thread —
+#   deleting it does not delete the transcript in checkpoints.sqlite. A thread
+#   whose row is pruned flips from "Alice's" to "unattributable", which
+#   can_use_thread hands to the unlimited tier. So a sweep must either delete
+#   the checkpoint alongside the row, or leave owned rows alone. The same
+#   warning applies in reverse to free_query_quotas, which must never be swept
+#   at all.
 RESEARCH_RUN_RETENTION_DAYS: int = 90
 
 # Budget rows are one per provider per day and tiny, but there is no reason to

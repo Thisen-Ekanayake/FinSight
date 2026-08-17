@@ -3,9 +3,17 @@
 # ═══════════════════════════════════════════════════════
 #
 # Nothing here reaches Google. verify_oauth2_token is replaced, so these test
-# OUR half — the allowlist, the 401/403 split, the email_verified rule, the
-# cache — and not the library's signature checking, which is not ours to
-# re-test.
+# OUR half — the tier split, the 401/403 codes, the email_verified rule, the
+# quota key, the cache — and not the library's signature checking, which is
+# not ours to re-test.
+#
+# ══ AUTH_ALLOWED_EMAILS IS NOT AN ADMISSION LIST ANY MORE ══
+#   It used to be: a verified account not named in it got a 403 and nothing
+#   else. It is now the UNLIMITED TIER. Any verified Google account is
+#   admitted and metered instead (src/api/quota.py, tests/test_quota.py), and
+#   only the routes that spend unbounded money or disclose configuration still
+#   demand membership. Several tests below assert the new direction where they
+#   once asserted the old one, and say so where they do.
 #
 # ══ THE TEST THAT MATTERS MOST ══
 #   test_health_is_reachable_without_a_token. /health behind auth makes the api
@@ -78,11 +86,21 @@ def auth_on() -> Iterator[None]:
 
 @pytest.fixture
 def client() -> Iterator[TestClient]:
-    """A minimal app: one guarded route that echoes the caller, plus /auth/config."""
+    """
+    A minimal app: one route per tier, echoing the caller, plus /auth/config.
+
+    /protected echoes the whole Identity rather than just the email, because
+    the tier and the subject are now load-bearing — the first decides what a
+    caller may reach, the second is the quota key.
+    """
     app = FastAPI()
 
     @app.get("/protected")
-    def protected(user: str = Depends(auth.require_user)) -> dict[str, str]:
+    def protected(identity: auth.Identity = Depends(auth.require_identity)) -> dict[str, Any]:
+        return {"user": identity.email, "subject": identity.subject, "unlimited": identity.unlimited}
+
+    @app.get("/reserved")
+    def reserved(user: str = Depends(auth.require_unlimited_user)) -> dict[str, str]:
         return {"user": user}
 
     app.include_router(auth_router)
@@ -103,16 +121,18 @@ def test_allowlisted_account_is_admitted_and_identified(client: TestClient) -> N
     assert response.status_code == 200
     # Not just 200 — the route must receive the caller, since that identity is
     # the whole reason for preferring this over a shared password.
-    assert response.json() == {"user": ALLOWED}
+    assert response.json()["user"] == ALLOWED
 
 
 def test_email_is_matched_case_insensitively(client: TestClient) -> None:
-    """Google may return the address in any case; the allowlist is lowercased."""
+    """Google may return the address in any case; the unlimited tier is lowercased."""
     with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims(email="Owner@Example.COM"))):
         response = _get(client, "mixed-case")
 
     assert response.status_code == 200
-    assert response.json() == {"user": ALLOWED}
+    assert response.json()["user"] == ALLOWED
+    # The case-folding must reach the tier match too, not just the display name.
+    assert response.json()["unlimited"] is True
 
 
 # ── Authentication failures are 401 ─────────────────────
@@ -180,19 +200,72 @@ def test_a_token_without_an_email_claim_is_refused(client: TestClient) -> None:
         assert _get(client, "no-email").status_code == 401
 
 
-# ── Authorisation failure is 403, not 401 ───────────────
-def test_a_verified_stranger_is_403(client: TestClient) -> None:
+# ── A verified stranger is a customer, not an intruder ──
+def test_a_verified_stranger_is_admitted_and_metered(client: TestClient) -> None:
     """
-    Signing in worked; this deployment just does not serve them.
+    The free tier's central premise: anyone with a Google account gets in.
 
-    A 401 here would send the dashboard around a re-login loop against a wall
-    it can never get past, which is why the two codes are kept distinct.
+    This asserted 403 before the free tier existed, when AUTH_ALLOWED_EMAILS
+    was an admission list. It is now the unlimited tier, so a stranger is
+    admitted and metered instead of refused. Whether they may spend anything
+    is src/api/quota.py's question, not this module's.
     """
     with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims(email="stranger@example.com"))):
         response = _get(client, "stranger")
 
+    assert response.status_code == 200
+    assert response.json()["user"] == "stranger@example.com"
+    assert response.json()["unlimited"] is False
+
+
+def test_the_unlimited_tier_is_flagged(client: TestClient) -> None:
+    """An allowlisted address is admitted the same way, but exempt from the meter."""
+    with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims())):
+        response = _get(client, "owner")
+
+    assert response.status_code == 200
+    assert response.json()["unlimited"] is True
+
+
+def test_a_stranger_is_refused_the_unlimited_only_routes(client: TestClient) -> None:
+    """
+    Opening sign-in to everyone must not open the routes that spend or disclose.
+
+    403, not 401: the sign-in worked and repeating it cannot help, which is
+    why the dashboard deliberately does not bounce a 403 to the sign-in screen.
+    """
+    with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims(email="stranger@example.com"))):
+        response = _get(client, "stranger", path="/reserved")
+
     assert response.status_code == 403
     assert "stranger@example.com" in response.json()["detail"]
+
+
+# ── The quota key is the `sub` claim, never the email ───
+def test_identity_is_keyed_by_the_sub_claim(client: TestClient) -> None:
+    """
+    A Google account can change its address; `sub` is stable.
+
+    Keying the lifetime counter by email would hand out a fresh allowance for
+    the price of an email change, which is the whole failure the key exists
+    to prevent.
+    """
+    with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims(sub="112233445566"))):
+        response = _get(client, "with-sub")
+
+    assert response.json()["subject"] == "112233445566"
+
+
+def test_a_token_without_sub_falls_back_to_the_email(client: TestClient) -> None:
+    """
+    A real Google token always carries `sub`. If one somehow does not, the
+    quota layer must still get a per-account key — an empty one would collapse
+    every such caller onto a single shared counter.
+    """
+    with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims())):
+        response = _get(client, "no-sub")
+
+    assert response.json()["subject"] == f"email:{ALLOWED}"
 
 
 # ── The cache ───────────────────────────────────────────
@@ -235,8 +308,13 @@ def test_distinct_tokens_do_not_share_a_cache_entry(client: TestClient) -> None:
     with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims())):
         assert _get(client, "token-a").status_code == 200
 
+    # Distinguished by WHO comes back, not by the status: both are 200 now
+    # that a stranger is admitted, so a shared cache entry would be invisible
+    # to a status-code assertion.
     with patch("google.oauth2.id_token.verify_oauth2_token", _returns(_claims(email="stranger@example.com"))):
-        assert _get(client, "token-b").status_code == 403
+        second = _get(client, "token-b")
+    assert second.status_code == 200
+    assert second.json()["user"] == "stranger@example.com"
 
 
 # ── Public routes ───────────────────────────────────────
@@ -355,7 +433,10 @@ def test_disabled_auth_admits_everyone_as_the_sentinel(client: TestClient) -> No
         response = _get(client)
 
     assert response.status_code == 200
-    assert response.json() == {"user": auth.ANONYMOUS_USER}
+    assert response.json()["user"] == auth.ANONYMOUS_USER
+    # Unlimited, not merely admitted. If this ever flips, pytest itself starts
+    # writing quota rows and the free tier meters the eval harness.
+    assert response.json()["unlimited"] is True
 
 
 # ── Startup validation ──────────────────────────────────
@@ -368,9 +449,30 @@ def test_validation_rejects_a_missing_client_id() -> None:
         core_config.validate_auth_config()
 
 
-def test_validation_rejects_an_empty_allowlist() -> None:
-    """An empty allowlist refuses every account while the API reports itself healthy."""
-    with patch.object(core_config, "AUTH_ALLOWED_EMAILS", frozenset()), pytest.raises(ConfigurationError):
+def test_an_empty_allowlist_warns_but_no_longer_fails(caplog: pytest.LogCaptureFixture) -> None:
+    """
+    This used to be fatal, when the allowlist decided admission.
+
+    Now it only means nobody is exempt from the meter — a legitimate, if
+    rarely intended, configuration. So it must warn loudly and still boot,
+    because failing here would refuse to start a deployment that works.
+    """
+    with patch.object(core_config, "AUTH_ALLOWED_EMAILS", frozenset()), caplog.at_level("WARNING"):
+        core_config.validate_auth_config()
+
+    assert "AUTH_ALLOWED_EMAILS is empty" in caplog.text
+
+
+def test_validation_rejects_a_negative_free_limit() -> None:
+    """A negative allowance is a typo, and it is checked in both auth modes."""
+    with patch.object(core_config, "FREE_QUERY_LIMIT", -1), pytest.raises(ConfigurationError):
+        core_config.validate_auth_config()
+
+    with (
+        patch.object(core_config, "AUTH_ENABLED", False),
+        patch.object(core_config, "FREE_QUERY_LIMIT", -1),
+        pytest.raises(ConfigurationError),
+    ):
         core_config.validate_auth_config()
 
 

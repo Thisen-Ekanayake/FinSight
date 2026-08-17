@@ -381,6 +381,15 @@ def check_monitor_decisions() -> None:
 
 # ── Research (read-only) ────────────────────────────────
 def check_research_reads() -> None:
+    """
+    Note that /research/runs is scoped to the caller.
+
+    This script sends no Authorization header, so it is aimed at a deployment
+    with AUTH_ENABLED=false — where every caller is an unlimited
+    ANONYMOUS_USER and therefore sees its own runs plus every unattributed
+    one. Against a deployment with auth ON these checks would 401 long before
+    the scoping mattered.
+    """
     section("research (read-only)")
     seen: dict[str, Any] = {}
 
