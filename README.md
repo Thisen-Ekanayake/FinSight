@@ -216,18 +216,21 @@ All free — see [`free_financial_data_sources.md`](./free_financial_data_source
 Scope decisions, listed because "not built yet" and "deliberately absent" look
 identical from outside and only one of them is worth a pull request.
 
-**Access control stops at an allowlist.** `AUTH_ENABLED=true` puts every route
-but `/health` behind a Google sign-in, checked against a list of addresses in
-`.env` — see [`docs/deploy.md`](./docs/deploy.md) §6. That is the whole model.
-There are no roles, no per-user data isolation, and no ownership column on any
-table: every allowlisted account can do everything, including approving another
-operator's paused alerts. This is a single-operator tool with a real front
-door, not a multi-tenant service.
+**Access control stops at two tiers.** `AUTH_ENABLED=true` puts every route but
+`/health` behind a Google sign-in — see [`docs/deploy.md`](./docs/deploy.md) §6.
+Any verified Google account may sign in and gets `FREE_QUERY_LIMIT` research
+queries for the lifetime of that account; the addresses in
+`AUTH_ALLOWED_EMAILS` skip the meter and are the only ones who may run
+monitoring cycles or read `/admin/*`. That is the whole model. Research history
+is scoped per account — you see the questions you asked and nobody else's — but
+nothing else is: the watchlist is global and mutable by any signed-in account,
+and every unlimited account can approve another operator's paused alerts.
 
-**No per-caller rate limiting.** The limiters in `src/data/rate_limit.py` pace
-outbound calls to protect free tiers; they do not throttle inbound ones. An
-allowlisted caller can spend Vertex quota freely, and `DAILY_BUDGETS` sets no
-Gemini ceiling.
+**No global spend ceiling.** The free tier caps queries per *account*, and a
+Google account costs nothing to create, so it is a product boundary rather than
+cost control. The limiters in `src/data/rate_limit.py` pace outbound calls to
+protect free tiers; they do not throttle inbound ones. `DAILY_BUDGETS` caps
+`fmp` and `alphavantage` and sets no Gemini ceiling at all.
 
 **No session layer.** The Google ID token *is* the credential, so a session
 lasts about an hour and expiry means signing in again. No refresh tokens, no

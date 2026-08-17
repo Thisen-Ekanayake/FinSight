@@ -269,15 +269,71 @@ the deploy already uses:
 AUTH_ENABLED=true
 GOOGLE_OAUTH_CLIENT_ID=1234567890-abc123.apps.googleusercontent.com
 AUTH_ALLOWED_EMAILS=you@gmail.com,colleague@gmail.com
+FREE_QUERY_LIMIT=5
+CONTACT_URL=https://github.com/Thisen-Ekanayake/FinSight
 ```
 
 Then `docker compose up -d --build`. The bundle needs rebuilding only because
 it is a static image; the client ID itself is read at runtime from
 `/auth/config`, so the same image works against any deployment.
 
-Setting `AUTH_ENABLED=true` without both other values **aborts startup** rather
-than booting half-guarded — an empty allowlist would refuse every account while
-`/health` still reported the service fine.
+Setting `AUTH_ENABLED=true` with no client ID **aborts startup** rather than
+booting half-guarded: no token could ever be verified, while `/health` still
+reported the service fine.
+
+### What the two tiers mean
+
+`AUTH_ALLOWED_EMAILS` is **not an admission list.** Any Google account with a
+verified email may sign in. What the list decides is how much they get:
+
+| | Free tier (anyone) | Unlimited tier (`AUTH_ALLOWED_EMAILS`) |
+|---|---|---|
+| `POST /research/query` and `/query/stream` | `FREE_QUERY_LIMIT` for the lifetime of the account, then **402** | unmetered |
+| Dashboard, findings, run history, watchlist | yes | yes |
+| `/monitor/*` — run or approve a cycle | **403** | yes |
+| `/admin/budgets`, `/admin/config` | **403** | yes |
+
+The monitor and admin routes are reserved because neither is metered and both
+are expensive or revealing: a cycle spends LLM tokens per watched ticker, and
+resuming one dispatches an alert. Opening sign-in to the world without that
+split would hand both to anyone with a Google account.
+
+`FREE_QUERY_LIMIT=0` restores the pre-free-tier behaviour — only the unlimited
+tier can query — except the refusal is a 402 carrying `CONTACT_URL` instead of
+a bare 403. An empty `AUTH_ALLOWED_EMAILS` now **warns instead of aborting**:
+it is a legitimate configuration, it just means nobody is exempt and nobody can
+reach the monitor.
+
+The counter lives in `free_query_quotas`, keyed by Google's `sub` claim rather
+than the email — an account that changes its address keeps one counter.
+`research_runs.subject` uses the same key, so history follows an account
+across an address change too.
+
+### Schema changes on an existing database
+
+`init_db()` runs `create_all()` for absent tables and then
+`_sync_additive_schema`, which diffs the live schema against the models and
+adds any missing **column or index** to a table that already exists. It is
+additive only and never drops, renames or retypes, so rolling the application
+back leaves a database the old code still runs against. Both of the above
+land on a running deployment with no manual step and no downtime.
+
+Anything destructive is deliberately out of scope — that wants a script and a
+person watching. The helper refuses at startup, loudly, if a model declares a
+column `ADD COLUMN` cannot create (a key, or `NOT NULL` with no server
+default), so the failure lands in review rather than on the VM.
+
+To grant someone more by hand:
+
+```bash
+docker compose exec api python -c "
+from src.persistence.db import session_scope
+from src.persistence.models import FreeQueryQuota
+with session_scope() as s:
+    for row in s.query(FreeQueryQuota).all():
+        print(row.email, row.used)
+"
+```
 
 **Check the boundary before trusting it:**
 
@@ -286,6 +342,7 @@ curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/health  
 curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/auth/config     # 200
 curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/admin/budgets   # 401
 curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/monitor/alerts  # 401
+curl -so /dev/null -w '%{http_code}\n' https://finsight.example.com/api/auth/quota      # 401
 ```
 
 `/health` answering 200 is not an oversight and must stay that way:
@@ -297,10 +354,15 @@ starts.
 been superseded — leaving it on means signing in twice, through a browser
 credential dialog that no longer protects anything the application does not.
 
-**Signing in and still being refused is the expected behaviour** for an address
-not in `AUTH_ALLOWED_EMAILS`. That is a 403, deliberately distinct from the 401
-an expired token gets: the account is verified, it is simply not permitted, and
-retrying the sign-in cannot change that.
+**Three refusal codes, and they mean different things.** Keeping them distinct
+is what stops the dashboard looping against a wall it cannot get past:
+
+- **401** — no token, or an expired one. Signing in again fixes it, and the
+  dashboard does exactly that.
+- **402** — the free queries are spent. Carries a JSON body with `used`,
+  `limit` and `contact_url`, which is what the "Contact sales" panel renders.
+- **403** — verified, but this route is reserved for `AUTH_ALLOWED_EMAILS`.
+  Retrying the sign-in cannot change it, so the dashboard does not try.
 
 ## 7. Before this stops being "a demo with a URL"
 
@@ -312,14 +374,25 @@ is not nothing:
   middleware and no API key check behind it. If you skipped §6, then §4's
   `basic_auth` block is the entire access control and it is doing far more
   work than it looks like — re-read §4 before removing it.
-- **Authentication is not rate limiting.** A signed-in, allowlisted caller can
-  spend Vertex quota as freely as a stranger could have. `DAILY_BUDGETS` in
-  `src/data/config.py` caps `fmp` and `alphavantage`; there is no Gemini
-  ceiling at all, and no per-caller limit anywhere.
-- **The allowlist is the whole authorisation model.** No roles, no per-user
-  data isolation, no ownership — every allowlisted account can do everything,
-  including approving another operator's paused alerts. No table in
-  `src/persistence/models.py` has an owner column.
+- **The free tier caps queries per account, not spend.** Google accounts are
+  free and unlimited to create, so five lifetime queries costs a determined
+  abuser about thirty seconds per five. There is still **no global ceiling**:
+  `DAILY_BUDGETS` in `src/data/config.py` caps `fmp` and `alphavantage`, and
+  there is no Gemini ceiling at all. Treat `FREE_QUERY_LIMIT` as a speed bump
+  and a product decision, not as cost control. A global daily cap reusing the
+  existing `ApiBudget` machinery is the real fix if this is ever public.
+- **The unlimited tier has no roles inside it.** No per-user data isolation,
+  no ownership — every allowlisted account can do everything, including
+  approving another operator's paused alerts. Only `free_query_quotas` is
+  per-account; no other table in `src/persistence/models.py` has an owner
+  column.
+- **Research history is per account, and that is the only isolation there is.**
+  `GET /research/runs` lists only the caller's runs and
+  `/research/threads/{id}` refuses anyone else's. Nothing else is scoped: the
+  watchlist is global and mutable by any signed-in account, and monitoring
+  alerts are shared across the unlimited tier. Runs recorded before this
+  existed, and every run started from the CLI, count as unattributable and are
+  visible to `AUTH_ALLOWED_EMAILS` only.
 - **Approvals are authenticated but not yet recorded.** `require_user` knows
   who resumed a cycle; `AlertRecord` does not store it. Until it does, the
   audit trail proves a *permitted* human approved an alert, not *which* one.
@@ -333,9 +406,9 @@ is not nothing:
   sign-in screen, mid-research-run included. A backend-issued session cookie
   is the fix if that becomes tiresome; there isn't one today.
 - This project does not do roles, per-user data isolation, or Kubernetes.
-  See "Not doing" in the [README](../README.md#not-doing). An allowlisted
-  Google sign-in is the intended ceiling, not a first step toward a user
-  system.
+  See "Not doing" in the [README](../README.md#not-doing). A two-tier Google
+  sign-in with a lifetime free-query counter is the intended ceiling, not a
+  first step toward a user system with billing.
 
 ## 8. Updating
 
