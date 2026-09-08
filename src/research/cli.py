@@ -25,7 +25,7 @@ from src.core.logging_setup import configure_logging
 from src.core.tracing import configure_tracing
 from src.persistence.checkpointer import sync_checkpointer
 from src.persistence.db import init_db
-from src.persistence.repository import record_research_run
+from src.persistence.repository import LEGACY_SUBJECT, record_research_run
 from src.research.config import RECURSION_LIMIT
 from src.research.graph import build_research_graph
 from src.research.state import RoutePlan, new_state
@@ -172,7 +172,16 @@ def main(argv: list[str] | None = None) -> int:
     _print_answer(final, show_audit=args.audit)
 
     init_db()
-    record_research_run(final, thread_id=thread_id, latency_ms=int(elapsed * 1000))
+    # ══ WHY THE CLI RECORDS NO OWNER ══
+    #   There is no token here and no sign-in — nothing to attribute a run to.
+    #   LEGACY_SUBJECT ('') puts CLI runs in the same bucket as everything
+    #   written before ownership existed, and that is the only value correct in
+    #   BOTH deployments: with auth on, the unlimited tier (the operator, who
+    #   is the person at this shell) sees them; with auth off, every caller is
+    #   an unlimited ANONYMOUS_USER and sees them too. Recording ANONYMOUS_USER
+    #   instead would hide CLI runs from everyone the moment auth is switched
+    #   on — including the operator who ran them.
+    record_research_run(final, thread_id=thread_id, subject=LEGACY_SUBJECT, latency_ms=int(elapsed * 1000))
 
     print(f"\n{RULE}\ncompleted in {elapsed:.1f}s   thread {thread_id}\n")
     return 0

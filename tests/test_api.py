@@ -19,9 +19,12 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.auth import require_user
+from src.api.auth import Identity, require_identity
 from src.api.research_routes import _series
 from src.persistence import db as db_module
+from src.persistence.db import session_scope
+from src.persistence.models import ResearchRun
+from src.persistence.repository import LEGACY_SUBJECT
 
 
 def _final_state(**overrides: Any) -> dict[str, Any]:
@@ -208,16 +211,26 @@ def client(tmp_path):
     ):
         app = main_module.create_app()
 
-        # Every route but /health and /auth/config is behind require_user. These
-        # tests are about routing, translation and persistence, so they run as a
-        # fixed signed-in user rather than minting tokens.
+        # Every route but /health and /auth/config is behind require_identity —
+        # directly, via require_user, or via require_unlimited_user. These tests
+        # are about routing, translation and persistence, so they run as a fixed
+        # signed-in user rather than minting tokens.
         #
         # Overriding rather than relying on AUTH_ENABLED defaulting to false is
         # the point: without this the suite passes or fails depending on whether
         # the developer running it happens to have auth switched on in .env.
-        # dependency_overrides reaches router-level dependencies too, so this
-        # one line covers every guarded route.
-        app.dependency_overrides[require_user] = lambda: "tester@example.com"
+        #
+        # require_identity is the RIGHT override target, not require_user:
+        # FastAPI applies overrides while recursing into sub-dependencies, so
+        # this one line covers all three guards while leaving require_user and
+        # require_unlimited_user real — the boundary under test stays the
+        # boundary that ships.
+        #
+        # unlimited=True is deliberate. Metering is tests/test_quota.py's
+        # subject; this file must not have a query budget.
+        app.dependency_overrides[require_identity] = lambda: Identity(
+            subject="test-subject", email="tester@example.com", unlimited=True
+        )
 
         with TestClient(app) as test_client:
             test_client.graph = graph  # type: ignore[attr-defined]
@@ -409,6 +422,104 @@ class TestAuditTrail:
     def test_an_unknown_thread_is_a_404(self, client):
         client.graph.history = []
         assert client.get("/research/threads/nope").status_code == 404
+
+
+def _as(client, subject, *, unlimited=False, email="someone@example.com"):
+    """Re-point the app at a different signed-in account, mid-test."""
+    client.app.dependency_overrides[require_identity] = lambda: Identity(subject, email, unlimited)
+
+
+class TestRunHistoryScoping:
+    """
+    A question, its answer and the thread id that replays it belong to
+    whoever asked. These are the tests that say so.
+    """
+
+    def test_the_listing_only_returns_the_callers_runs(self, client):
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        _as(client, "stranger-sub")
+        assert client.get("/research/runs").json() == []
+
+    def test_a_foreign_thread_replay_is_a_404(self, client):
+        """
+        ══ THE ONE THAT PROVES THE CHECK PRECEDES THE CHECKPOINTER ══
+          The stub graph has a full four-step history for t1 and will happily
+          return it. Only an ownership check that runs BEFORE
+          aget_state_history can turn that into a 404 — move it after, and the
+          question text and the whole answer are already in hand.
+        """
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        _as(client, "stranger-sub")
+        assert client.get("/research/threads/t1").status_code == 404
+
+    def test_the_refusal_is_indistinguishable_from_an_unknown_thread(self, client):
+        """
+        A 403 would confirm the thread exists and belongs to someone else.
+        The ids are opaque and random, so that admission buys a legitimate
+        caller nothing and hands an enumerator everything.
+        """
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        _as(client, "stranger-sub")
+        foreign = client.get("/research/threads/t1")
+        unknown = client.get("/research/threads/definitely-not-a-thread")
+
+        assert foreign.status_code == unknown.status_code == 404
+        assert foreign.json()["detail"].replace("t1", "X") == unknown.json()["detail"].replace(
+            "definitely-not-a-thread", "X"
+        )
+
+    def test_a_foreign_thread_id_on_a_query_is_refused_before_the_graph_runs(self, client):
+        """
+        Closing the write hole. Supplying someone else's thread id used to
+        append to their checkpoint history and overwrite their row — a write
+        primitive against another account, which would also have handed the
+        hijacker ownership and therefore read access.
+        """
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        # Armed to explode: if the refusal came after the graph rather than
+        # before it, this would surface as a 500 instead of a 404.
+        client.graph.raises = RuntimeError("the graph should never have been reached")
+
+        _as(client, "stranger-sub")
+        response = client.post("/research/query", json={"query": "give me that", "thread_id": "t1"})
+
+        assert response.status_code == 404
+
+    def test_a_foreign_thread_id_on_the_stream_route_is_refused(self, client):
+        """A real 404 status line, not a 200 carrying an SSE error frame."""
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        _as(client, "stranger-sub")
+        response = client.post("/research/query/stream", json={"query": "give me that", "thread_id": "t1"})
+
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")
+
+    def test_the_original_owner_still_sees_everything(self, client):
+        """The scoping must not lock the author out of their own history."""
+        client.post("/research/query", json={"query": "Apple revenue?", "thread_id": "t1"})
+
+        _as(client, "stranger-sub")
+        assert client.get("/research/runs").json() == []
+
+        _as(client, "test-subject", unlimited=True, email="tester@example.com")
+        assert [run["thread_id"] for run in client.get("/research/runs").json()] == ["t1"]
+        assert client.get("/research/threads/t1").status_code == 200
+
+    def test_the_unlimited_tier_sees_legacy_rows_and_free_accounts_do_not(self, client):
+        """Rows from before ownership existed, and CLI runs, become the operator's."""
+        with session_scope() as session:
+            session.add(ResearchRun(thread_id="research:old", query="from before", subject=LEGACY_SUBJECT))
+
+        _as(client, "stranger-sub")
+        assert client.get("/research/runs").json() == []
+
+        _as(client, "test-subject", unlimited=True, email="tester@example.com")
+        assert [r["thread_id"] for r in client.get("/research/runs").json()] == ["research:old"]
 
 
 class TestStreaming:

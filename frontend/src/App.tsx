@@ -8,8 +8,15 @@
 //   correct on the screen that already tells you. It polls, because the whole
 //   premise of the watching half is that things happen while nobody is
 //   looking — and the scheduler can pause a cycle with the app open.
+//
+// ══ WHY THE QUOTA IS LOADED HERE TOO ══
+//   Same reasoning, different reason to care: the remaining count belongs
+//   next to the question box, but it is the shell that knows when a sign-in
+//   has just happened. It does NOT poll — nothing spends a query except this
+//   browser, so it reloads on demand after Ask finishes one.
 // ═══════════════════════════════════════════════════════
 
+import * as api from './api/client';
 import { Header } from './components/Header';
 import { Loading } from './components/primitives';
 import { useAuth } from './hooks/useAuth';
@@ -34,6 +41,11 @@ export function App() {
   // session would otherwise fire a 401 every 45 seconds, forever.
   const pending = useResource(() => loadPending(), [authed], { pollMs: 45_000, enabled: authed });
   const pendingCount = (pending.data ?? []).reduce((total, entry) => total + entry.alerts.length, 0);
+
+  // A free-tier account is refused the monitor routes, so `pending` above will
+  // 403 for them — useResource keeps that in `error` and the badge simply
+  // stays at zero, which is the right outcome: there is nothing they can act on.
+  const quota = useResource(() => api.quota(), [authed], { enabled: authed });
 
   // Deliberately before the shell: rendering Header and a view first would
   // fire every view's own loader against a guarded API.
@@ -80,7 +92,7 @@ export function App() {
             navigate={navigate}
           />
         ) : null}
-        {view === 'ask' ? <Ask /> : null}
+        {view === 'ask' ? <Ask quota={quota.data} onSpend={quota.reload} /> : null}
         {view === 'findings' ? <Findings onCycleFinished={pending.reload} vizColors={vizColors} /> : null}
         {view === 'watchlist' ? <Watchlist /> : null}
         {view === 'system' ? <System /> : null}
@@ -102,7 +114,21 @@ export function App() {
         <span>
           Severity reads [!!] HIGH, [~] MED, [.] LOW, so it survives greyscale. Colour only repeats the marker.
         </span>
-        <span>No live market data — every source is a delayed free tier.</span>
+        <span style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <span>No live market data — every source is a delayed free tier.</span>
+          {/* The URL comes from the API rather than a constant here, for the
+              same reason the Google client ID does: one bundle, any deployment. */}
+          {quota.data?.contact_url ? (
+            <a
+              href={quota.data.contact_url}
+              target="_blank"
+              rel="noreferrer noopener"
+              style={{ color: 'var(--ink-42)' }}
+            >
+              Source
+            </a>
+          ) : null}
+        </span>
       </footer>
     </div>
   );

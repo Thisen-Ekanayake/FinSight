@@ -69,13 +69,20 @@ finding pauses for a human decision — durably, via a LangGraph `interrupt()`
 checkpointed to disk — before it reaches console, file, or email.
 
 When `AUTH_ENABLED` is set, every route below needs a Google ID token as
-`Authorization: Bearer <token>` from an address in `AUTH_ALLOWED_EMAILS`.
+`Authorization: Bearer <token>`. Any Google account with a verified email may
+sign in, and gets `FREE_QUERY_LIMIT` research queries for the lifetime of that
+account; spending them all turns `POST /research/query` into a **402** carrying
+a contact URL. Addresses in `AUTH_ALLOWED_EMAILS` are the unlimited tier — they
+skip the meter, and they are the only ones who may run monitoring cycles or
+read `/admin/*`, neither of which is metered.
+
 `GET /health` and `GET /auth/config` stay open — the first so container
 healthchecks work, the second because it is what an unauthenticated browser
 reads in order to sign in.
 
-* `POST /research/query` — ask a question
+* `POST /research/query` — ask a question (metered)
 * `GET /research/threads/{thread_id}` — replay the run's full audit trail
+* `GET /auth/quota` — how many free queries this account has left
 * `POST /monitor/cycles` — run a monitoring cycle now (may pause for approval)
 * `POST /monitor/cycles/{cycle_id}/resume` — decide a paused cycle's HIGH alerts
 * `GET /monitor/decisions` — every dedup decision, with the score behind it
@@ -187,7 +194,7 @@ def create_app() -> FastAPI:
     FastAPI
     """
     from src.api.admin_routes import router as admin_router
-    from src.api.auth import require_user
+    from src.api.auth import require_unlimited_user, require_user
     from src.api.auth_routes import router as auth_router
     from src.api.monitor_routes import router as monitor_router
     from src.api.research_routes import router as research_router
@@ -237,15 +244,27 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
-    # ══ THE AUTH BOUNDARY ══
+    # ══ THE AUTH BOUNDARY: TWO TIERS ══
     #   Guarded at the router, so a route added later is guarded by default
     #   rather than by whoever remembers. /health and /auth/config are the two
     #   deliberate exceptions, both below.
+    #
+    #   `guarded` admits any verified Google account. That is what makes the
+    #   free tier possible, and it is why `reserved` has to exist: opening
+    #   sign-in to the world also opens every route behind it, and not every
+    #   route is safe or cheap in a stranger's hands.
+    #
+    #     guarded   research + watchlist. The expensive verb here is metered
+    #               per account (src/api/quota.py); the rest is SQLite reads.
+    #     reserved  monitor. A cycle spends unbounded LLM tokens per watched
+    #               ticker and is NOT metered, and resuming one DISPATCHES an
+    #               alert. Neither belongs to a free trial.
     guarded = [Depends(require_user)]
+    reserved = [Depends(require_unlimited_user)]
 
     app.include_router(research_router, dependencies=guarded)
     app.include_router(watchlist_router, dependencies=guarded)
-    app.include_router(monitor_router, dependencies=guarded)
+    app.include_router(monitor_router, dependencies=reserved)
 
     # admin_router cannot take a blanket dependency: GET /health lives in it and
     # has to stay open. docker-compose.yml probes it to decide service_healthy,

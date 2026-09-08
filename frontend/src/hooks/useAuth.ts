@@ -138,8 +138,12 @@ export function useAuth(): Auth {
 
     // A 401 from any later call means the token expired or was revoked. Clear
     // the identity and fall back to the gate; client.ts has already dropped
-    // the token by the time this runs. 403 does not come through here — that
-    // account can never be admitted, so re-prompting would loop.
+    // the token by the time this runs.
+    //
+    // Neither 403 nor 402 comes through here. 403 means the route is reserved
+    // for the unlimited tier and 402 means the free queries are spent — a new
+    // token fixes neither, so re-prompting would loop against a wall. The 402
+    // is handled where it can be acted on, in Ask.tsx.
     setUnauthorizedHandler(() => {
       if (cancelled) return;
       setEmail('');

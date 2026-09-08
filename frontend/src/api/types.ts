@@ -320,3 +320,34 @@ export type StreamEvent =
   | { event: 'node'; data: StreamNode }
   | { event: 'final'; data: QueryResponse }
   | { event: 'error'; data: { detail: string } };
+
+// ── Free tier ───────────────────────────────────────────
+
+/** GET /auth/quota — mirrors QuotaOut. */
+export interface Quota {
+  /**
+   * False for the unlimited tier and whenever the API runs with auth off. The
+   * other counts are meaningless then, so the UI hides them rather than
+   * telling someone with no limit that they have five left.
+   */
+  metered: boolean;
+  used: number;
+  limit: number;
+  remaining: number;
+  contact_url: string;
+}
+
+/**
+ * The `detail` object inside a 402 — mirrors QuotaExceededOut.
+ *
+ * Structured rather than a message so the view can render a call to action
+ * without pattern-matching prose to decide whether this is the right error.
+ */
+export interface QuotaExceeded {
+  error: 'free_quota_exhausted';
+  message: string;
+  used: number;
+  limit: number;
+  remaining: number;
+  contact_url: string;
+}

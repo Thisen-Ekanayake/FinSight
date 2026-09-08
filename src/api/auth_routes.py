@@ -2,10 +2,11 @@
 # FinSight — Auth Routes
 # ═══════════════════════════════════════════════════════
 #
-# Purpose : Tell the browser how to sign in, before anyone has.
+# Purpose : Tell the browser how to sign in, and what its allowance is once it has.
 #
 # Routes:
-#   GET /auth/config   whether auth is on, and the client ID to use
+#   GET /auth/config   whether auth is on, and the client ID to use  (public)
+#   GET /auth/quota    this account's free-query standing            (authenticated)
 #
 # ══ WHY THE CLIENT ID IS SERVED, NOT BAKED INTO THE BUNDLE ══
 #   Vite inlines env vars at BUILD time, which is exactly why
@@ -19,16 +20,21 @@
 #   made — Google's security model rests on the authorised-origins list and
 #   the token signature, never on the ID being hidden.
 #
-# ══ THIS ROUTE IS PUBLIC, NECESSARILY ══
-#   It is what an unauthenticated browser reads in order to become an
-#   authenticated one. It carries no secret and no state.
+# ══ /config IS PUBLIC, NECESSARILY — /quota IS NOT ══
+#   /config is what an unauthenticated browser reads in order to become an
+#   authenticated one, so this router is included WITHOUT the app-wide guard
+#   (see src/api/main.py). /quota therefore carries its own dependency in its
+#   signature. Same shape as admin_routes.py, where an otherwise-guarded
+#   router keeps /health open for the healthcheck.
 # ═══════════════════════════════════════════════════════
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.api.schemas import AuthConfigOut
+from src.api.auth import CurrentIdentity
+from src.api.quota import read_quota
+from src.api.schemas import AuthConfigOut, QuotaOut
 from src.core import config as core_config
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -47,3 +53,16 @@ async def auth_config() -> AuthConfigOut:
         enabled=core_config.AUTH_ENABLED,
         client_id=core_config.GOOGLE_OAUTH_CLIENT_ID if core_config.AUTH_ENABLED else "",
     )
+
+
+@router.get("/quota", response_model=QuotaOut, summary="This account's free-query allowance")
+async def auth_quota(identity: CurrentIdentity) -> QuotaOut:
+    """
+    Report what this account has left, without spending any of it.
+
+    Exists so the dashboard can say "3 of 5 free queries left" BEFORE the
+    user commits to a question. Discovering the limit only by hitting a 402
+    would mean the last free query and the first refused one look identical
+    until it is too late to choose differently.
+    """
+    return read_quota(identity)
