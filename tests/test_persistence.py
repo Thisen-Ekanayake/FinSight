@@ -15,7 +15,7 @@ from sqlalchemy import Column, Integer, String, Table, inspect, text
 
 from src.persistence import db as db_module
 from src.persistence.db import get_engine, init_db, reset_engine, session_scope
-from src.persistence.models import Base, ApiBudget, ResearchRun
+from src.persistence.models import ApiBudget, Base, ResearchRun
 from src.persistence.repository import (
     LEGACY_SUBJECT,
     can_use_thread,

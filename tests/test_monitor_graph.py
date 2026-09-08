@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -88,11 +89,17 @@ class TestFanoutAsymmetry:
         assert monitor_fanout(new_cycle_state([])) == []
 
     def test_every_branch_carries_its_own_since_map(self):
-        state = new_cycle_state(watchlist("AAPL"), last_checked={"AAPL:filing": "2026-08-01T00:00:00+00:00"})
+        # The watermark is relative to now, never a literal date: lookback_for
+        # clamps anything older than MAX_LOOKBACK_DAYS up to the floor, so a
+        # hardcoded one stops being the value under test the moment the
+        # calendar walks past it — and the test then fails on the clock rather
+        # than on the fan-out.
+        watermark = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        state = new_cycle_state(watchlist("AAPL"), last_checked={"AAPL:filing": watermark})
         sends = monitor_fanout(state)
 
         filings = next(s for s in sends if s.node == "filing_monitor")
-        assert filings.arg["since"]["AAPL"].startswith("2026-08-01")
+        assert filings.arg["since"]["AAPL"] == watermark
 
     def test_the_batched_set_is_exactly_price_and_macro(self):
         # Guards against a monitor being added to the batched set without its
