@@ -13,8 +13,9 @@
 #           short momentum — all standardised) plus the CURRENT weights, so the
 #           policy can learn that moving costs money.
 #   action  a target weight vector over [asset_1 … asset_N, cash], summing to 1.
-#   reward  log growth of the portfolio over the next bar
-#             − transaction cost on the turnover the action caused
+#   reward  log growth of the portfolio over the next bar, net of the
+#           transaction cost its turnover caused,
+#             − log growth of an equal-weight basket (relative_reward)
 #             − risk_aversion × (bar return)²
 #           The squared term is a per-step variance penalty: with
 #           risk_aversion = 0 the agent maximises growth alone, and raising it
@@ -46,6 +47,10 @@ class EnvConfig:
     episode_len: int = 60
     cost_bps: float = 10.0
     risk_aversion: float = 1.0
+    # Score growth RELATIVE to holding the assets equally. Market-wide moves
+    # then cancel out of the reward, so the learner sees the signal it can
+    # actually act on (which asset, how much cash) instead of mostly noise.
+    relative_reward: bool = True
 
 
 def softmax(logits: np.ndarray) -> np.ndarray:
@@ -138,6 +143,8 @@ class PortfolioEnv:
         gross = float(target @ asset_returns)
         net = gross - cost
         growth = np.log(max(1.0 + net, 1e-6))
+        if self.config.relative_reward:
+            growth -= np.log(max(1.0 + float(asset_returns[:-1].mean()), 1e-6))
         reward = growth - self.config.risk_aversion * gross**2
 
         # Weights drift with the market until the next rebalance.

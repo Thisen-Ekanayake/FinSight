@@ -25,7 +25,17 @@
 // ═══════════════════════════════════════════════════════
 
 import type {
+  AgentInfo,
   Alert,
+  BrokerAccount,
+  BrokerStatus,
+  BudgetCategory,
+  CategoryKind,
+  LedgerEntry,
+  MonthSummary,
+  OrderProposal,
+  PolicyRun,
+  SavingsGoal,
   AuthConfig,
   Budget,
   Config,
@@ -421,4 +431,95 @@ export function budgets(): Promise<Budget[]> {
 /** Effective configuration, secrets excluded. */
 export function config(): Promise<Config> {
   return request<Config>('GET', '/admin/config');
+}
+
+// ── Finance management ──────────────────────────────────
+
+export function financeSummary(month?: string): Promise<MonthSummary> {
+  return request('GET', '/finance/summary', { params: { month } });
+}
+
+export function saveCategory(name: string, monthlyLimit: number, kind: CategoryKind): Promise<BudgetCategory> {
+  return request('PUT', '/finance/categories', { body: { name, monthly_limit: monthlyLimit, kind } });
+}
+
+export function deleteCategory(id: number): Promise<void> {
+  return request('DELETE', `/finance/categories/${id}`);
+}
+
+export function listEntries(month?: string): Promise<LedgerEntry[]> {
+  return request('GET', '/finance/entries', { params: { month } });
+}
+
+export function addEntry(entry: Omit<LedgerEntry, 'id'>): Promise<LedgerEntry> {
+  return request('POST', '/finance/entries', { body: entry });
+}
+
+export function deleteEntry(id: number): Promise<void> {
+  return request('DELETE', `/finance/entries/${id}`);
+}
+
+export function addGoal(name: string, target: number, saved = 0, deadline: string | null = null): Promise<SavingsGoal> {
+  return request('POST', '/finance/goals', { body: { name, target, saved, deadline } });
+}
+
+export function contribute(goalId: number, amount: number): Promise<SavingsGoal> {
+  return request('POST', `/finance/goals/${goalId}/contribute`, { body: { amount } });
+}
+
+export function deleteGoal(id: number): Promise<void> {
+  return request('DELETE', `/finance/goals/${id}`);
+}
+
+// ── RL agents ───────────────────────────────────────────
+
+export function listAgents(): Promise<AgentInfo[]> {
+  return request('GET', '/rl/agents');
+}
+
+export function startRun(body: {
+  tickers: string[];
+  risk_aversion: number;
+  episodes: number;
+  cost_bps: number;
+}): Promise<PolicyRun> {
+  return request('POST', '/rl/runs', { body });
+}
+
+export function listPolicyRuns(limit = 20): Promise<PolicyRun[]> {
+  return request('GET', '/rl/runs', { params: { limit } });
+}
+
+export function getPolicyRun(runId: string): Promise<PolicyRun> {
+  return request('GET', `/rl/runs/${encodeURIComponent(runId)}`);
+}
+
+// ── Paper broker ────────────────────────────────────────
+
+export function brokerStatus(): Promise<BrokerStatus> {
+  return request('GET', '/broker/status');
+}
+
+export function linkBroker(keyId: string, secret: string): Promise<{ linked: boolean; account: BrokerAccount }> {
+  return request('POST', '/broker/link', { body: { key_id: keyId, secret } });
+}
+
+export function unlinkBroker(): Promise<void> {
+  return request('DELETE', '/broker/link');
+}
+
+export function pauseTrading(paused: boolean): Promise<{ paused: boolean }> {
+  return request('POST', '/broker/pause', { body: { paused } });
+}
+
+export function proposeOrders(runId: string): Promise<OrderProposal[]> {
+  return request('POST', '/broker/proposals', { body: { run_id: runId } });
+}
+
+export function listProposals(status?: string): Promise<OrderProposal[]> {
+  return request('GET', '/broker/proposals', { params: { status } });
+}
+
+export function decideProposals(approve: string[], reject: string[]): Promise<OrderProposal[]> {
+  return request('POST', '/broker/proposals/decide', { body: { approve, reject } });
 }

@@ -53,6 +53,10 @@ class TrainConfig:
     window: int = 20
     episode_len: int = 60
     seed: int = 7
+    relative_reward: bool = True
+    # Pulls the weights toward zero, i.e. toward an even split. The policy has
+    # to see consistent evidence before it concentrates.
+    l2: float = 0.05
 
 
 class _Adam:
@@ -135,7 +139,11 @@ def train_portfolio_agent(
         raise ValueError(f"not enough history to train and backtest ({T} bars)")
 
     env_cfg = EnvConfig(
-        window=cfg.window, episode_len=cfg.episode_len, cost_bps=cfg.cost_bps, risk_aversion=cfg.risk_aversion
+        window=cfg.window,
+        episode_len=cfg.episode_len,
+        cost_bps=cfg.cost_bps,
+        risk_aversion=cfg.risk_aversion,
+        relative_reward=cfg.relative_reward,
     )
     train_env = PortfolioEnv(returns[:split], env_cfg)
     rng = np.random.default_rng(cfg.seed)
@@ -177,6 +185,7 @@ def train_portfolio_agent(
             adv = (rtg - mean) / std
             grad += ((eps_arr / sigma) * adv[:, None]).T @ phi_arr
         grad /= len(all_returns)
+        grad -= cfg.l2 * theta
         theta += adam.step(grad)
 
         done_episodes += n_this

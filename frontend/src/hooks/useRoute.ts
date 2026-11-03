@@ -2,9 +2,9 @@
 // FinSight web — routing
 // ═══════════════════════════════════════════════════════
 //
-// Five views, no nesting, no params. Real paths (/findings) rather than a
-// fragment (#findings), and still no router dependency — five flat routes do
-// not need one.
+// Nine flat views, no nesting, no params. Real paths (/budget) rather than a
+// fragment (#budget), and still no router dependency — flat routes do not
+// need one.
 //
 // ══ WHAT MAKES THE PATHS WORK ══
 //   The app ships as static files, so a hard refresh on /findings asks the
@@ -17,17 +17,30 @@
 // ══ FRAGMENTS ARE STILL FRAGMENTS ══
 //   The anchor targets in the Desk hero (href="#queue") are same-page jumps,
 //   not routes; on /desk the browser resolves them to /desk#queue and scrolls,
-//   which is exactly what they always meant. `fromPath` matching only the five
+//   which is exactly what they always meant. `fromPath` matching only the
 //   view slugs keeps them out of routing, and an unknown path falls back to
 //   the default view rather than rendering nothing.
 // ═══════════════════════════════════════════════════════
 
 import { useCallback, useEffect, useState } from 'react';
 
-export const VIEWS = ['desk', 'ask', 'findings', 'watchlist', 'system'] as const;
+export const VIEWS = [
+  'overview',
+  'budget',
+  'portfolio',
+  'agents',
+  'desk',
+  'ask',
+  'findings',
+  'watchlist',
+  'system',
+] as const;
+
+/** Where an unknown or empty path lands. */
+export const DEFAULT_VIEW: View = 'overview';
 export type View = (typeof VIEWS)[number];
 
-/** A view slug, or null when this is not one of the five routes. */
+/** A view slug, or null when this is not one of the routes. */
 function fromPath(path: string): View | null {
   const slug = path.replace(/^\/+|\/+$/g, '').split('?')[0];
   return (VIEWS as readonly string[]).includes(slug) ? (slug as View) : null;
@@ -45,7 +58,7 @@ function fromLegacyHash(): View | null {
 }
 
 export function useRoute(): { view: View; navigate: (view: View) => void } {
-  const [view, setView] = useState<View>(() => fromLegacyHash() ?? fromPath(window.location.pathname) ?? 'desk');
+  const [view, setView] = useState<View>(() => fromLegacyHash() ?? fromPath(window.location.pathname) ?? DEFAULT_VIEW);
 
   useEffect(() => {
     const legacy = fromLegacyHash();
@@ -55,7 +68,7 @@ export function useRoute(): { view: View; navigate: (view: View) => void } {
   useEffect(() => {
     // popstate, not hashchange: the back button is now the only thing that
     // changes the location without going through `navigate`.
-    const onPopState = () => setView(fromPath(window.location.pathname) ?? 'desk');
+    const onPopState = () => setView(fromPath(window.location.pathname) ?? DEFAULT_VIEW);
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
