@@ -7,6 +7,7 @@
 # Public API:
 #   Base, ResearchRun, ApiBudget, FreeQueryQuota
 #   WatchItem, MonitorCheckpoint, AlertRecord, MonitorCycle, DedupDecision
+#   BudgetCategory, LedgerEntry, SavingsGoal, PolicyRun, BrokerLink, OrderProposal
 #
 # ══ WHAT IS AND IS NOT STORED HERE ══
 #   ResearchRun is a SUMMARY, not the run. The full intermediate state —
@@ -385,3 +386,140 @@ class MonitorCycle(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<MonitorCycle {self.cycle_id} fired={self.fired_count}>"
+
+
+# ═══════════════════════════════════════════════════════
+# Finance management (budgets, goals, RL agents, paper broker)
+# ═══════════════════════════════════════════════════════
+#
+# Every row below is keyed by ``subject`` — the Google ``sub`` claim, for the
+# reason FreeQueryQuota documents. These are one person's money records; no
+# route may ever read across subjects, and every repository function in
+# src/finance/repository.py takes the subject as a required keyword.
+
+
+class BudgetCategory(Base):
+    """A monthly spending envelope: "Groceries, 400 / month"."""
+
+    __tablename__ = "budget_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    monthly_limit: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    # need / want / savings — the 50/30/20 split the budget agent reasons over.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="need")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (UniqueConstraint("subject", "name", name="uq_budget_category_subject_name"),)
+
+
+class LedgerEntry(Base):
+    """One income or expense line. ``amount`` is always positive; ``direction`` carries the sign."""
+
+    __tablename__ = "ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    occurred_on: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False, default="expense")
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class SavingsGoal(Base):
+    """A target with a running balance: "Emergency fund, 2,150 of 6,000"."""
+
+    __tablename__ = "savings_goals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[float] = mapped_column(Float, nullable=False)
+    saved: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    deadline: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class PolicyRun(Base):
+    """
+    One training run of an RL agent, from QUEUED to DONE/FAILED.
+
+    Progress is written here by the training thread and polled by the UI, so a
+    page reload mid-training picks the run straight back up. ``curve`` and
+    ``result`` are JSON text: the shapes belong to src/rl, not to the schema.
+    """
+
+    __tablename__ = "policy_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    agent: Mapped[str] = mapped_column(String(32), nullable=False, default="portfolio")
+    tickers: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    params: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="QUEUED", index=True)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    episodes_done: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    episodes_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    curve: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class BrokerLink(Base):
+    """
+    One account's Alpaca PAPER credentials, encrypted at rest.
+
+    The key id and secret are Fernet ciphertext (src/broker/secrets.py). The
+    plaintext exists only in memory for the duration of one broker call.
+    ``trading_paused`` is the per-account kill switch.
+    """
+
+    __tablename__ = "broker_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    key_id_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hint: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    trading_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+
+class OrderProposal(Base):
+    """
+    One order an agent PROPOSED, and what a person decided about it.
+
+    PENDING → SUBMITTING → SUBMITTED | FAILED, or PENDING → REJECTED /
+    SUPERSEDED. Only a person's approval moves a row out of PENDING toward the
+    broker, and that PENDING → SUBMITTING step is a conditional UPDATE so a double
+    click can submit at most once. ``client_order_id`` is sent to Alpaca as
+    the idempotency key for the same reason one layer down.
+    """
+
+    __tablename__ = "order_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    proposal_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    notional: Mapped[float] = mapped_column(Float, nullable=False)
+    current_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    target_weight: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reason: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
+    broker_order_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    error: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -32,6 +32,11 @@ langchain-google-genai==4.3.2
 # dependency and take sign-in down with it.
 google-auth==2.56.2
 
+# Encrypts each account's broker (Alpaca paper) keys at rest — see
+# src/broker/secrets.py. Already a transitive dependency; pinned to a major
+# here because the stored ciphertext format depends on it.
+cryptography>=43,<51
+
 # ── Vector store & embeddings ─────────────────────
 # qdrant-client must track the pinned server (v1.17.1). fastembed's ONNX model
 # registry moves, and changing the embedding model invalidates every tuned
