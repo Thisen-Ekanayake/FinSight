@@ -82,13 +82,28 @@ class TestEnv:
 
 
 class TestAgent:
-    def test_learns_to_prefer_the_rising_asset(self):
+    def test_baseline_learns_to_prefer_the_rising_asset(self):
         r = _synthetic()
-        res = train_portfolio_agent(r, [f"d{i}" for i in range(len(r))], ["UP", "DOWN", "NOISE"], TrainConfig())
+        res = train_portfolio_agent(
+            r, [f"d{i}" for i in range(len(r))], ["UP", "DOWN", "NOISE"], TrainConfig(algorithm="reinforce")
+        )
         avg = res["average_weights"]
+        assert res["algorithm"] == "reinforce"
         assert avg["UP"] > 3 * avg["DOWN"]
         assert avg["UP"] > avg["NOISE"]
         assert res["metrics"]["policy"]["total_return"] > res["metrics"]["buy_hold"]["total_return"]
+
+    def test_ppo_tilts_toward_the_rising_asset_on_every_seed(self):
+        """PPO's weight-decay prior makes it less concentrated, but more consistent, than the baseline."""
+        r = _synthetic()
+        dates = [f"d{i}" for i in range(len(r))]
+        for seed in (1, 2, 7):
+            res = train_portfolio_agent(r, dates, ["UP", "DOWN", "NOISE"], TrainConfig(algorithm="ppo", seed=seed))
+            avg, m = res["average_weights"], res["metrics"]
+            assert res["algorithm"] == "ppo"
+            assert avg["UP"] > avg["DOWN"] and avg["UP"] > avg["NOISE"]
+            assert m["policy"]["total_return"] > m["equal_weight"]["total_return"]
+            assert m["policy"]["total_return"] > m["buy_hold"]["total_return"]
 
     def test_is_deterministic_for_a_seed(self):
         r = _synthetic(400)
@@ -256,6 +271,12 @@ class TestTimingAgent:
         assert sum(beats) >= 2
         assert res["feature_weights"]["mom_60d"] > 0  # it learned momentum, in the right direction
         assert all(0 < s["time_in_market"] < 1 for s in res["signals"])
+
+    def test_baseline_also_learns_regimes(self):
+        syn = _regimes()
+        cfg = TimingConfig(algorithm="reinforce", episodes=600)
+        res = train_timing_agent(syn, [f"d{i}" for i in range(len(syn))], ["A", "B", "C"], cfg)
+        assert sum(s["metrics"]["agent"]["sharpe"] > s["metrics"]["buy_hold"]["sharpe"] for s in res["signals"]) >= 2
 
     def test_stays_long_when_there_is_nothing_to_time(self):
         drift = np.full((800, 2), 0.001) + np.random.default_rng(2).normal(0, 0.002, (800, 2))

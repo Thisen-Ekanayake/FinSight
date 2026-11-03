@@ -11,7 +11,7 @@ import type { TimingResult, TimingSignal } from '../../api/types';
 import { Card, Disclaimer, Icon, ProgressBar, useAction } from '../../components/ui';
 import { pct, signedPct } from '../../lib/money';
 import { Legend, TrendChart } from '../../viz/finance';
-import { MarketForm, PRESETS, TickerChips, type MarketParams } from './PortfolioLab';
+import { AlgoChip, MarketForm, PRESETS, TickerChips, type MarketParams } from './PortfolioLab';
 import { LivePanel, RunHistory, useLiveRun } from './shared';
 
 const FEATURE_LABELS: Record<string, string> = {
@@ -27,7 +27,7 @@ const FEATURE_LABELS: Record<string, string> = {
 
 export function TimingLab() {
   const live = useLiveRun<TimingResult>('timing');
-  const [params, setParams] = useState<MarketParams>({ tickers: PRESETS['Big tech'], risk_aversion: 1, episodes: 600, cost_bps: 10 });
+  const [params, setParams] = useState<MarketParams>({ algorithm: 'ppo', tickers: PRESETS['Big tech'], risk_aversion: 1, episodes: 600, cost_bps: 10 });
   const { busy, run } = useAction();
   const active = live.active;
   const result = active?.status === 'DONE' ? active.result : null;
@@ -68,6 +68,7 @@ export function TimingLab() {
         activeId={live.activeId}
         onSelect={live.setActiveId}
         columns={[
+          { label: 'Algorithm', render: (r) => <AlgoChip algorithm={r.params.algorithm ?? 'reinforce'} /> },
           { label: 'Universe', render: (r) => r.tickers.join(', ') },
           {
             label: 'Signals',
@@ -187,7 +188,7 @@ function TimingResults({ result }: { result: TimingResult }) {
               ]}
             />
           </Card>
-          <Card title="What the policy looks at">
+          <Card title={result.algorithm === 'ppo' ? 'What the network responds to' : 'What the policy looks at'}>
             <div style={{ display: 'grid', gap: 10 }}>
               {weights.map(([name, w]) => (
                 <div key={name}>
@@ -215,7 +216,9 @@ function TimingResults({ result }: { result: TimingResult }) {
               ))}
             </div>
             <p style={{ fontSize: 12, color: 'var(--ink-52)', margin: '14px 0 0' }}>
-              Green pushes toward staying invested, red toward cash.
+              {result.algorithm === 'ppo'
+                ? 'Average change in the network’s output when each feature rises. Green pushes toward staying invested, red toward cash.'
+                : 'The linear policy’s weights. Green pushes toward staying invested, red toward cash.'}
             </p>
           </Card>
         </div>

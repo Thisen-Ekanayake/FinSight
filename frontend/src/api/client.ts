@@ -26,6 +26,7 @@
 
 import type {
   AgentInfo,
+  Algorithm,
   BudgetResult,
   LabelCounts,
   PreferenceRow,
@@ -491,6 +492,7 @@ export function startRun(body: {
   risk_aversion: number;
   episodes: number;
   cost_bps: number;
+  algorithm?: Algorithm;
 }): Promise<PolicyRun> {
   return request('POST', '/rl/runs', { body });
 }
@@ -508,6 +510,7 @@ export function startTimingRun(body: {
   risk_aversion: number;
   episodes: number;
   cost_bps: number;
+  algorithm?: Algorithm;
 }): Promise<PolicyRun<TimingResult>> {
   return request('POST', '/rl/timing/runs', { body });
 }

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
@@ -50,7 +50,7 @@ AGENTS: list[dict[str, Any]] = [
         "name": "Portfolio allocator",
         "status": "available",
         "summary": "Learns target weights across your tickers and cash, trading return against risk and turnover.",
-        "method": "Policy gradient (REINFORCE) over a linear-softmax policy",
+        "method": "PPO with neural actor-critic (linear REINFORCE baseline selectable)",
     },
     {
         "id": "budget",
@@ -64,7 +64,7 @@ AGENTS: list[dict[str, Any]] = [
         "name": "Trade timing",
         "status": "available",
         "summary": "Learns when to be invested or in cash, per ticker. Signals and backtests only — never orders.",
-        "method": "Policy gradient over a logistic long/flat policy, weekly decisions",
+        "method": "PPO with neural actor-critic over long / flat, weekly decisions (linear baseline selectable)",
     },
     {
         "id": "alerts",
@@ -165,6 +165,12 @@ def _launch(*, subject: str, agent: str, tickers: list[str], params: dict[str, A
     return run_id
 
 
+def _algo(algorithm: str) -> Literal["ppo", "reinforce"]:
+    if algorithm not in ("ppo", "reinforce"):
+        raise TrainingRefused("algorithm must be 'ppo' or 'reinforce'.", 422)
+    return "ppo" if algorithm == "ppo" else "reinforce"
+
+
 def _clean_tickers(tickers: list[str]) -> list[str]:
     clean = list(dict.fromkeys(t.strip().upper() for t in tickers if t.strip()))
     if not MIN_ASSETS <= len(clean) <= MAX_ASSETS:
@@ -179,12 +185,13 @@ def start_portfolio_run(
     risk_aversion: float,
     episodes: int,
     cost_bps: float,
+    algorithm: str = "ppo",
     loader: Loader | None = None,
 ) -> str:
     """Train the portfolio allocator in the background."""
     clean = _clean_tickers(tickers)
     episodes = int(max(50, min(episodes, MAX_EPISODES)))
-    config = TrainConfig(episodes=episodes, risk_aversion=risk_aversion, cost_bps=cost_bps)
+    config = TrainConfig(algorithm=_algo(algorithm), episodes=episodes, risk_aversion=risk_aversion, cost_bps=cost_bps)
 
     def job(
         progress: Callable[[int, int, float], None], stage: Callable[[str], None]
@@ -195,7 +202,7 @@ def start_portfolio_run(
         result = train_portfolio_agent(returns, dates, clean, config, on_progress=progress)
         return result, result["learning_curve"]
 
-    params = {"risk_aversion": risk_aversion, "episodes": episodes, "cost_bps": cost_bps}
+    params = {"risk_aversion": risk_aversion, "episodes": episodes, "cost_bps": cost_bps, "algorithm": algorithm}
     return _launch(subject=subject, agent="portfolio", tickers=clean, params=params, total=episodes, job=job)
 
 
@@ -206,12 +213,13 @@ def start_timing_run(
     risk_aversion: float,
     episodes: int,
     cost_bps: float,
+    algorithm: str = "ppo",
     loader: Loader | None = None,
 ) -> str:
     """Train the long/flat timing agent in the background. Signals only — never orders."""
     clean = _clean_tickers(tickers)
     episodes = int(max(50, min(episodes, MAX_EPISODES)))
-    config = TimingConfig(episodes=episodes, risk_aversion=risk_aversion, cost_bps=cost_bps)
+    config = TimingConfig(algorithm=_algo(algorithm), episodes=episodes, risk_aversion=risk_aversion, cost_bps=cost_bps)
 
     def job(
         progress: Callable[[int, int, float], None], stage: Callable[[str], None]
@@ -222,7 +230,7 @@ def start_timing_run(
         result = train_timing_agent(returns, dates, clean, config, on_progress=progress)
         return result, result["learning_curve"]
 
-    params = {"risk_aversion": risk_aversion, "episodes": episodes, "cost_bps": cost_bps}
+    params = {"risk_aversion": risk_aversion, "episodes": episodes, "cost_bps": cost_bps, "algorithm": algorithm}
     return _launch(subject=subject, agent="timing", tickers=clean, params=params, total=episodes, job=job)
 
 

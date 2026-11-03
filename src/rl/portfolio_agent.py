@@ -28,19 +28,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
 from src.rl.portfolio_env import EnvConfig, PortfolioEnv, portfolio_metrics, softmax
+from src.rl.ppo import Episode, PPOConfig, PPOLearner
 
 ProgressFn = Callable[[int, int, float], None]
 
 MAX_SERIES_POINTS = 250
 
 
+Algorithm = Literal["ppo", "reinforce"]
+
+
 @dataclass(frozen=True)
 class TrainConfig:
+    algorithm: Algorithm = "ppo"
+    # PPO settings, tuned on synthetic data and the ETF universe only; the
+    # tech and defensive universes were held out to check them.
+    ppo_actor_lr: float = 3e-3
+    ppo_init_log_std: float = 0.0
+    ppo_epochs: int = 6
+    ppo_hidden: tuple[int, ...] = (64, 64)
+    # Exploration noise follows sigma_start → sigma_end like the baseline's,
+    # rather than being learned: a learned std stays wide, so training sees
+    # noisy (diversified) portfolios while the backtest runs the concentrated
+    # mean — a train/test mismatch that cost ~0.5 Sharpe in tuning.
+    ppo_anneal_std: bool = True
+    # Decoupled weight decay on the actor: the network's analogue of the
+    # baseline's L2 pull toward "no preference" (an even split).
+    ppo_weight_decay: float = 8.0
     episodes: int = 400
     batch: int = 8
     learning_rate: float = 0.05
@@ -92,62 +111,26 @@ def _discounted(rewards: list[float], gamma: float) -> np.ndarray:
     return out
 
 
-def _run_policy(env: PortfolioEnv, theta: np.ndarray) -> tuple[list[float], list[np.ndarray]]:
+Act = Callable[[np.ndarray], np.ndarray]
+
+
+def _run_policy(env: PortfolioEnv, act: Act) -> tuple[list[float], list[np.ndarray]]:
     """Deterministic rollout from the env's first bar to its last."""
     obs = env.reset()
     net: list[float] = []
     held: list[np.ndarray] = []
     while not env.done():
-        weights = softmax(theta @ obs)
+        weights = act(obs)
         held.append(weights)
         obs, _, info = env.step(weights)
         net.append(info["net"])
     return net, held
 
 
-def train_portfolio_agent(
-    returns: np.ndarray,
-    dates: list[str],
-    tickers: list[str],
-    config: TrainConfig | None = None,
-    on_progress: ProgressFn | None = None,
-) -> dict[str, Any]:
-    """
-    Train on the head of ``returns``, backtest on the tail, and propose weights for today.
-
-    Parameters
-    ----------
-    returns : ndarray
-        ``(T, N)`` simple daily returns, oldest first. ``dates[i]`` is the date
-        of ``returns[i]``.
-    on_progress : callable, optional
-        ``(episodes_done, episodes_total, mean_episode_reward)`` after each batch.
-
-    Returns
-    -------
-    dict
-        JSON-serialisable result: target weights, learning curve, backtest
-        equity curves and metrics for the policy and both benchmarks.
-    """
-    cfg = config or TrainConfig()
-    if returns.shape[1] != len(tickers) or returns.shape[0] != len(dates):
-        raise ValueError("returns, dates and tickers disagree on shape")
-
-    T = returns.shape[0]
-    split = int(T * (1 - cfg.test_fraction))
-    if split - cfg.window < cfg.episode_len + 5 or T - split < 20:
-        raise ValueError(f"not enough history to train and backtest ({T} bars)")
-
-    env_cfg = EnvConfig(
-        window=cfg.window,
-        episode_len=cfg.episode_len,
-        cost_bps=cfg.cost_bps,
-        risk_aversion=cfg.risk_aversion,
-        relative_reward=cfg.relative_reward,
-    )
-    train_env = PortfolioEnv(returns[:split], env_cfg)
-    rng = np.random.default_rng(cfg.seed)
-
+def _train_reinforce(
+    train_env: PortfolioEnv, cfg: TrainConfig, rng: np.random.Generator, on_progress: ProgressFn | None
+) -> tuple[Act, list[float]]:
+    """The linear-softmax REINFORCE baseline."""
     theta = np.zeros((train_env.n_actions, train_env.n_features))
     adam = _Adam(theta.shape, cfg.learning_rate)
 
@@ -193,10 +176,114 @@ def train_portfolio_agent(
         if on_progress:
             on_progress(done_episodes, cfg.episodes, curve[-1])
 
+    return (lambda obs: softmax(theta @ obs)), curve
+
+
+def _train_ppo(
+    train_env: PortfolioEnv, cfg: TrainConfig, rng: np.random.Generator, on_progress: ProgressFn | None
+) -> tuple[Act, list[float]]:
+    """
+    PPO with MLP actor and critic. The actor's Gaussian sample is a vector of
+    logits; softmax turns it into the weights the environment sees, exactly
+    as the linear baseline does — only the function from state to logits is
+    now a neural network, and the baseline is a learned value function.
+    """
+    learner = PPOLearner(
+        "gaussian",
+        train_env.n_features,
+        train_env.n_actions,
+        PPOConfig(
+            gamma=cfg.gamma,
+            init_log_std=cfg.ppo_init_log_std,
+            actor_lr=cfg.ppo_actor_lr,
+            epochs=cfg.ppo_epochs,
+            hidden=cfg.ppo_hidden,
+            learn_std=not cfg.ppo_anneal_std,
+            weight_decay=cfg.ppo_weight_decay,
+        ),
+        rng,
+    )
+    curve: list[float] = []
+    max_start = train_env.end - cfg.episode_len
+    done_episodes = 0
+    while done_episodes < cfg.episodes:
+        if cfg.ppo_anneal_std:
+            frac = done_episodes / max(1, cfg.episodes - cfg.batch)
+            learner.log_std[:] = np.log(cfg.sigma_start + (cfg.sigma_end - cfg.sigma_start) * min(1.0, frac))
+        n_this = min(cfg.batch, cfg.episodes - done_episodes)
+        episodes: list[Episode] = []
+        for _ in range(n_this):
+            obs = train_env.reset(int(rng.integers(cfg.window, max_start + 1)))
+            ep = Episode()
+            for _ in range(cfg.episode_len):
+                if train_env.done():
+                    break
+                action, logp = learner.act(obs, rng)
+                next_obs, reward, _ = train_env.step(softmax(action))
+                ep.add(obs, action, logp, reward)
+                obs = next_obs
+            ep.last_obs = obs
+            episodes.append(ep)
+        learner.learn(episodes, rng)
+        done_episodes += n_this
+        curve.append(float(np.mean([sum(ep.rewards) for ep in episodes])))
+        if on_progress:
+            on_progress(done_episodes, cfg.episodes, curve[-1])
+    return (lambda obs: softmax(learner.act_deterministic(obs))), curve
+
+
+def train_portfolio_agent(
+    returns: np.ndarray,
+    dates: list[str],
+    tickers: list[str],
+    config: TrainConfig | None = None,
+    on_progress: ProgressFn | None = None,
+) -> dict[str, Any]:
+    """
+    Train on the head of ``returns``, backtest on the tail, and propose weights for today.
+
+    Parameters
+    ----------
+    returns : ndarray
+        ``(T, N)`` simple daily returns, oldest first. ``dates[i]`` is the date
+        of ``returns[i]``.
+    on_progress : callable, optional
+        ``(episodes_done, episodes_total, mean_episode_reward)`` after each batch.
+
+    Returns
+    -------
+    dict
+        JSON-serialisable result: target weights, learning curve, backtest
+        equity curves and metrics for the policy and both benchmarks.
+    """
+    cfg = config or TrainConfig()
+    if returns.shape[1] != len(tickers) or returns.shape[0] != len(dates):
+        raise ValueError("returns, dates and tickers disagree on shape")
+
+    T = returns.shape[0]
+    split = int(T * (1 - cfg.test_fraction))
+    if split - cfg.window < cfg.episode_len + 5 or T - split < 20:
+        raise ValueError(f"not enough history to train and backtest ({T} bars)")
+
+    env_cfg = EnvConfig(
+        window=cfg.window,
+        episode_len=cfg.episode_len,
+        cost_bps=cfg.cost_bps,
+        risk_aversion=cfg.risk_aversion,
+        relative_reward=cfg.relative_reward,
+    )
+    train_env = PortfolioEnv(returns[:split], env_cfg)
+    rng = np.random.default_rng(cfg.seed)
+
+    if cfg.algorithm == "ppo":
+        act, curve = _train_ppo(train_env, cfg, rng, on_progress)
+    else:
+        act, curve = _train_reinforce(train_env, cfg, rng, on_progress)
+
     # ── out-of-sample backtest ──────────────────────
     test_returns = returns[split - cfg.window :]
     test_env = PortfolioEnv(test_returns, env_cfg, scale=train_env.scale)
-    policy_net, held = _run_policy(test_env, theta)
+    policy_net, held = _run_policy(test_env, act)
     test_dates = dates[split : split + len(policy_net)]
     tail = returns[split : split + len(policy_net)]
 
@@ -213,7 +300,7 @@ def train_portfolio_agent(
     # be holding after walking the test span.
     full_env = PortfolioEnv(returns, env_cfg, scale=train_env.scale)
     obs_now = full_env.features(t=T, weights=test_env.weights)
-    target = softmax(theta @ obs_now)
+    target = act(obs_now)
 
     avg_held = np.mean(held, axis=0) if held else target
     labels = [*tickers, "CASH"]
@@ -236,7 +323,9 @@ def train_portfolio_agent(
             "equal_weight": dict(portfolio_metrics(equal_weight)),
             "buy_hold": dict(portfolio_metrics(buy_hold)),
         },
+        "algorithm": cfg.algorithm,
         "config": {
+            "algorithm": cfg.algorithm,
             "episodes": cfg.episodes,
             "risk_aversion": cfg.risk_aversion,
             "cost_bps": cfg.cost_bps,

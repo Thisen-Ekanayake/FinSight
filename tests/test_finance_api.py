@@ -163,6 +163,16 @@ class TestTraining:
         assert set(body["result"]["target_weights"]) == {"AAA", "BBB", "CASH"}
         assert body["result"]["backtest"]["policy"]
 
+    def test_ppo_is_the_default_and_the_baseline_is_selectable(self, api):
+        ppo = api.post("/rl/runs", json={"tickers": ["AAA", "BBB"], "episodes": 50}).json()
+        base = api.post("/rl/runs", json={"tickers": ["AAA", "BBB"], "episodes": 50, "algorithm": "reinforce"}).json()
+        assert api.get(f"/rl/runs/{ppo['run_id']}").json()["result"]["algorithm"] == "ppo"
+        assert api.get(f"/rl/runs/{base['run_id']}").json()["result"]["algorithm"] == "reinforce"
+        assert base["params"]["algorithm"] == "reinforce"
+
+    def test_unknown_algorithm_is_422(self, api):
+        assert api.post("/rl/runs", json={"tickers": ["AAA", "BBB"], "algorithm": "dqn"}).status_code == 422
+
     def test_ticker_count_is_validated(self, api):
         assert api.post("/rl/runs", json={"tickers": ["AAA"]}).status_code == 422
 

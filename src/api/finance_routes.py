@@ -95,6 +95,8 @@ class TrainIn(BaseModel):
     risk_aversion: float = Field(default=1.0, ge=0, le=10)
     episodes: int = Field(default=600, ge=50, le=rl.MAX_EPISODES)
     cost_bps: float = Field(default=10, ge=0, le=100)
+    # "ppo": neural actor-critic (default). "reinforce": the linear baseline.
+    algorithm: Literal["ppo", "reinforce"] = "ppo"
 
     @field_validator("tickers")
     @classmethod
@@ -230,6 +232,7 @@ async def post_run(body: TrainIn, identity: CurrentIdentity) -> dict[str, Any]:
             risk_aversion=body.risk_aversion,
             episodes=body.episodes,
             cost_bps=body.cost_bps,
+            algorithm=body.algorithm,
         )
     except rl.TrainingRefused as exc:
         raise HTTPException(exc.status, str(exc)) from exc
@@ -247,6 +250,7 @@ async def post_timing_run(body: TrainIn, identity: CurrentIdentity) -> dict[str,
             risk_aversion=body.risk_aversion,
             episodes=body.episodes,
             cost_bps=body.cost_bps,
+            algorithm=body.algorithm,
         )
     except rl.TrainingRefused as exc:
         raise HTTPException(exc.status, str(exc)) from exc
