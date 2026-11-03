@@ -28,12 +28,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import numpy as np
 
 from src.rl.portfolio_agent import _Adam, _discounted, _downsample
 from src.rl.portfolio_env import portfolio_metrics
+from src.rl.ppo import Episode, PPOConfig, PPOLearner
 
 ProgressFn = Callable[[int, int, float], None]
 
@@ -43,6 +44,10 @@ N_FEATURES = 8
 
 @dataclass(frozen=True)
 class TimingConfig:
+    algorithm: Literal["ppo", "reinforce"] = "ppo"
+    ppo_actor_lr: float = 3e-3
+    ppo_weight_decay: float = 8.0
+    ppo_ent_coef: float = 0.01
     episodes: int = 600
     batch: int = 8
     episode_len: int = 60
@@ -127,8 +132,11 @@ def _rollout(
     return (np.array(phis), np.array(grads_scale), _discounted(rewards, cfg.gamma)), float(np.sum(rewards))
 
 
+ProbFn = Callable[[np.ndarray], float]
+
+
 def _backtest(
-    theta: np.ndarray,
+    prob: ProbFn,
     feats: np.ndarray,
     returns: np.ndarray,
     scale: float,
@@ -142,7 +150,7 @@ def _backtest(
     strat, held = [], []
     for t in range(split, T):
         if (t - split) % cfg.hold == 0:
-            action = int(_sigmoid(float(theta @ _phi(feats, t, pos))) > 0.5)
+            action = int(prob(_phi(feats, t, pos)) > 0.5)
         else:
             action = pos
         cost = abs(action - pos) * cfg.cost_bps / 10_000.0
@@ -152,7 +160,7 @@ def _backtest(
     bh = returns[split:]
     # Today's signal: features over the most recent bars, current position.
     last_feats, _ = ticker_features(np.append(returns, 0.0), scale)
-    p_now = _sigmoid(float(theta @ _phi(last_feats, T, pos)))
+    p_now = prob(_phi(last_feats, T, pos))
     return {
         "ticker": ticker,
         "signal": "LONG" if p_now > 0.5 else "FLAT",
@@ -173,31 +181,20 @@ def _backtest(
     }
 
 
-def train_timing_agent(
+FEATURE_NAMES = ["mom_5d", "mom_20d", "mom_60d", "vol_ratio", "vs_ma50", "vol_level", "position", "bias"]
+Trained = tuple[ProbFn, list[float], dict[str, float]]
+
+
+def _train_reinforce(
+    feats: list[np.ndarray],
     returns: np.ndarray,
-    dates: list[str],
-    tickers: list[str],
-    config: TimingConfig | None = None,
-    on_progress: ProgressFn | None = None,
-) -> dict[str, Any]:
-    """Train a shared long/flat policy on the head of each series; backtest each on the tail."""
-    cfg = config or TimingConfig()
-    T, N = returns.shape
-    if N != len(tickers) or T != len(dates):
-        raise ValueError("returns, dates and tickers disagree on shape")
-    split = int(T * (1 - cfg.test_fraction))
-    if split - WARMUP < cfg.episode_len + 5 or T - split < 20:
-        raise ValueError(f"not enough history to train and backtest ({T} bars)")
-
-    # Feature scale per ticker comes from the TRAINING span only.
-    feats, scales = [], []
-    for j in range(N):
-        _, scale = ticker_features(returns[:split, j])
-        f, _ = ticker_features(returns[:, j], scale)
-        feats.append(f)
-        scales.append(scale)
-
-    rng = np.random.default_rng(cfg.seed)
+    split: int,
+    cfg: TimingConfig,
+    rng: np.random.Generator,
+    on_progress: ProgressFn | None,
+) -> Trained:
+    """The logistic REINFORCE baseline."""
+    N = returns.shape[1]
     # The prior leans "stay long" (prior_bias 0.5 → p ≈ 0.62). The L2 term below pulls toward THIS,
     # not toward zero — zero would be a coin flip, and a coin flip in a rising
     # market is an expensive default. The policy has to earn every exit.
@@ -233,22 +230,132 @@ def train_timing_agent(
         if on_progress:
             on_progress(done, cfg.episodes, curve[-1])
 
+    return (
+        (lambda phi: _sigmoid(float(theta @ phi))),
+        curve,
+        {n: round(float(w), 4) for n, w in zip(FEATURE_NAMES, theta)},
+    )
+
+
+def _train_ppo(
+    feats: list[np.ndarray],
+    returns: np.ndarray,
+    split: int,
+    cfg: TimingConfig,
+    rng: np.random.Generator,
+    on_progress: ProgressFn | None,
+) -> Trained:
+    """
+    PPO with an MLP actor (Bernoulli long/flat) and critic. One decision per
+    `hold` days; the reward for a decision is the sum over the days it holds.
+    The actor starts at the same long-leaning prior as the baseline, via a
+    fixed logit offset, and weight decay pulls the network back toward it.
+    """
+    N = returns.shape[1]
+    learner = PPOLearner(
+        "bernoulli",
+        N_FEATURES,
+        1,
+        PPOConfig(
+            gamma=cfg.gamma,
+            actor_lr=cfg.ppo_actor_lr,
+            weight_decay=cfg.ppo_weight_decay,
+            ent_coef=cfg.ppo_ent_coef,
+        ),
+        rng,
+    )
+    learner.bias = cfg.prior_bias
+    curve: list[float] = []
+    done = 0
+    states: list[np.ndarray] = []
+    while done < cfg.episodes:
+        n_this = min(cfg.batch, cfg.episodes - done)
+        episodes: list[Episode] = []
+        for _ in range(n_this):
+            j = int(rng.integers(N))
+            start = int(rng.integers(WARMUP, split - cfg.episode_len))
+            ep, pos = Episode(), 1
+            for t in range(start, start + cfg.episode_len, cfg.hold):
+                phi = _phi(feats[j], t, pos)
+                action, logp = learner.act(phi, rng)
+                a = int(action[0])
+                reward = sum(
+                    _step_reward(a, pos if k == t else a, float(returns[k, j]), cfg)
+                    for k in range(t, min(t + cfg.hold, returns.shape[0]))
+                )
+                ep.add(phi, action, logp, reward)
+                pos = a
+            ep.last_obs = _phi(feats[j], min(start + cfg.episode_len, returns.shape[0] - 1), pos)
+            episodes.append(ep)
+            states.extend(ep.obs)
+        learner.learn(episodes, rng)
+        done += n_this
+        curve.append(round(float(np.mean([sum(ep.rewards) for ep in episodes])), 6))
+        if on_progress:
+            on_progress(done, cfg.episodes, curve[-1])
+
+    # Sensitivity of the logit to each feature, averaged over visited states.
+    sample = np.array(states[:: max(1, len(states) // 400)])
+    explain: dict[str, float] = {}
+    for k, name in enumerate(FEATURE_NAMES[:-1]):
+        hi, lo = sample.copy(), sample.copy()
+        hi[:, k] += 0.5
+        lo[:, k] -= 0.5
+        explain[name] = round(float(np.mean(learner.actor.forward(hi)[:, 0] - learner.actor.forward(lo)[:, 0])), 4)
+    explain["bias"] = round(float(np.mean(learner.actor.forward(sample)[:, 0])) + learner.bias, 4)
+    return learner.prob, curve, explain
+
+
+def train_timing_agent(
+    returns: np.ndarray,
+    dates: list[str],
+    tickers: list[str],
+    config: TimingConfig | None = None,
+    on_progress: ProgressFn | None = None,
+) -> dict[str, Any]:
+    """Train a shared long/flat policy on the head of each series; backtest each on the tail."""
+    cfg = config or TimingConfig()
+    T, N = returns.shape
+    if N != len(tickers) or T != len(dates):
+        raise ValueError("returns, dates and tickers disagree on shape")
+    split = int(T * (1 - cfg.test_fraction))
+    if split - WARMUP < cfg.episode_len + 5 or T - split < 20:
+        raise ValueError(f"not enough history to train and backtest ({T} bars)")
+
+    # Feature scale per ticker comes from the TRAINING span only.
+    feats, scales = [], []
+    for j in range(N):
+        _, scale = ticker_features(returns[:split, j])
+        f, _ = ticker_features(returns[:, j], scale)
+        feats.append(f)
+        scales.append(scale)
+
+    rng = np.random.default_rng(cfg.seed)
+    if cfg.algorithm == "ppo":
+        prob, curve, explain = _train_ppo(feats, returns, split, cfg, rng, on_progress)
+    else:
+        prob, curve, explain = _train_reinforce(feats, returns, split, cfg, rng, on_progress)
+
     # ── out-of-sample backtest, deterministic (long iff p > 0.5) ──
     per_ticker = []
     test_dates = dates[split:]
     for j, ticker in enumerate(tickers):
-        per_ticker.append(_backtest(theta, feats[j], returns[:, j], scales[j], split, ticker, cfg))
+        per_ticker.append(_backtest(prob, feats[j], returns[:, j], scales[j], split, ticker, cfg))
 
-    names = ["mom_5d", "mom_20d", "mom_60d", "vol_ratio", "vs_ma50", "vol_level", "position", "bias"]
     return {
+        "algorithm": cfg.algorithm,
         "tickers": tickers,
         "signals": per_ticker,
         "dates": _downsample(test_dates),
         "learning_curve": _downsample(curve),
-        "feature_weights": {n: round(float(w), 4) for n, w in zip(names, theta)},
+        # Linear baseline: the weights themselves. PPO: the average sensitivity
+        # of the policy's logit to each feature over the training states — the
+        # nearest thing a network has to "what it weighs".
+        "feature_weights": explain,
         "train_span": {"start": dates[0], "end": dates[split - 1], "bars": split},
         "test_span": {"start": test_dates[0], "end": test_dates[-1], "bars": len(test_dates)},
         "config": {
+            "algorithm": cfg.algorithm,
             "episodes": cfg.episodes,
             "risk_aversion": cfg.risk_aversion,
             "cost_bps": cfg.cost_bps,
