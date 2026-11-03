@@ -417,7 +417,10 @@ export interface StrategyMetrics {
   max_drawdown: number;
 }
 
+export type Algorithm = 'ppo' | 'reinforce';
+
 export interface PortfolioResult {
+  algorithm?: Algorithm;
   tickers: string[];
   target_weights: Record<string, number>;
   average_weights: Record<string, number>;
@@ -435,7 +438,7 @@ export interface PolicyRun<R = PortfolioResult> {
   run_id: string;
   agent: string;
   tickers: string[];
-  params: { risk_aversion?: number; episodes?: number; cost_bps?: number; rounds?: number };
+  params: { risk_aversion?: number; episodes?: number; cost_bps?: number; rounds?: number; algorithm?: Algorithm };
   status: RunStatus;
   stage: string;
   episodes_done: number;
@@ -563,6 +566,7 @@ export interface TimingSignal {
 }
 
 export interface TimingResult {
+  algorithm?: Algorithm;
   tickers: string[];
   signals: TimingSignal[];
   dates: string[];

@@ -181,10 +181,21 @@ per-position caps, counted against a daily limit, and blocked by the per-account
 
 | Agent | Learns | Method | Acts by |
 |---|---|---|---|
-| **Portfolio allocator** | Target weights across 2–8 tickers + cash | REINFORCE over a linear-softmax policy; reward is log growth *relative to an equal-weight basket*, minus turnover cost and a variance penalty | Paper-order **proposals** you approve one by one |
+| **Portfolio allocator** | Target weights across 2–8 tickers + cash | **PPO** with MLP actor-critic (linear REINFORCE baseline selectable); reward is log growth *relative to an equal-weight basket*, minus turnover cost and a variance penalty | Paper-order **proposals** you approve one by one |
 | **Budget & savings planner** | What share of income to save first | Linear Thompson-sampling contextual bandit, trained in a household simulator fitted to your own ledger (income, fixed needs, flexible wants, goal deadlines, emergency buffer) | Category limits + per-goal contributions you can **apply** (limits only — no money moves) |
-| **Trade timing** | When each ticker is worth holding vs sitting in cash | Shared logistic long/flat policy, weekly decisions, reward relative to buy-and-hold | **Signals and backtests only** — it has no path to the broker |
+| **Trade timing** | When each ticker is worth holding vs sitting in cash | **PPO** with MLP actor-critic over long/flat (linear baseline selectable), weekly decisions, reward relative to buy-and-hold | **Signals and backtests only** — it has no path to the broker |
 | **Alert prioritiser** | Which monitor alerts matter to you | Beta-Bernoulli Thompson sampling over alert type, severity and ticker, from HIGH-alert approvals (implicit) and 👍/👎 (explicit) | **Reorders** alerts — never hides or auto-decides one |
+
+**PPO without PyTorch.** The networks are small (two 64-unit tanh layers) and learn from a few thousand
+daily bars, so PPO runs on a numpy MLP with hand-written backprop (`src/rl/nn.py`, `src/rl/ppo.py`) —
+GAE, clipped surrogate, entropy bonus, KL early stop, reward scaling — rather than adding ~700 MB of
+PyTorch to the image. `tests/test_ppo.py` checks every gradient against finite differences.
+
+| Portfolio allocator, out-of-sample Sharpe (3 seeds) | Linear baseline | PPO | Equal weight |
+|---|---|---|---|
+| ETFs (used for tuning) | 1.14 ± 0.21 | 1.06 ± 0.09 | 1.29 |
+| Big tech (held out) | 1.43 ± 0.09 | **1.63 ± 0.07** | 1.70 |
+| Defensive (held out) | 0.75 ± 0.61 | **1.35 ± 0.06** | 1.45 |
 
 **What they are and aren't.** Every market agent is judged on a held-out tail it never trained on,
 next to a plain benchmark. On real daily data the allocator usually does **not** beat a 1/N portfolio,

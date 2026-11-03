@@ -7,7 +7,7 @@
 
 import { useState } from 'react';
 import * as api from '../../api/client';
-import type { PortfolioResult, StrategyMetrics } from '../../api/types';
+import type { Algorithm, PortfolioResult, StrategyMetrics } from '../../api/types';
 import { Card, Icon, Slider, TickerInput, useAction } from '../../components/ui';
 import type { View } from '../../hooks/useRoute';
 import { pct, signedPct } from '../../lib/money';
@@ -27,6 +27,7 @@ export function riskLabel(r: number): string {
 }
 
 export interface MarketParams {
+  algorithm: Algorithm;
   tickers: string[];
   risk_aversion: number;
   episodes: number;
@@ -55,6 +56,22 @@ export function MarketForm({
   return (
     <Card title={title}>
       <div style={{ display: 'grid', gap: 18 }}>
+        <div className="field">
+          <label>Algorithm</label>
+          <div className="seg" role="radiogroup" aria-label="Algorithm" style={{ width: '100%' }}>
+            {(['ppo', 'reinforce'] as Algorithm[]).map((a) => (
+              <label key={a} className="seg-opt" style={{ flex: 1, justifyContent: 'center' }}>
+                <input type="radio" name={`algo-${title}`} checked={value.algorithm === a} onChange={() => set({ algorithm: a })} />
+                {a === 'ppo' ? 'PPO · neural' : 'Linear baseline'}
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--ink-52)', marginTop: 6 }}>
+            {value.algorithm === 'ppo'
+              ? 'Actor-critic neural networks, clipped policy updates. Slower, steadier.'
+              : 'A linear policy trained with REINFORCE — fast, and the yardstick PPO must beat.'}
+          </div>
+        </div>
         <div className="field">
           <label>Universe (2–8 tickers)</label>
           <TickerInput value={value.tickers} onChange={(tickers) => set({ tickers })} />
@@ -104,9 +121,20 @@ export function MarketForm({
   );
 }
 
-export function TickerChips({ tickers, params }: { tickers: string[]; params: { risk_aversion?: number; cost_bps?: number } }) {
+export function AlgoChip({ algorithm }: { algorithm?: Algorithm }) {
+  return <span className="chip chip-accent">{algorithm === 'reinforce' ? 'Linear baseline' : 'PPO · neural'}</span>;
+}
+
+export function TickerChips({
+  tickers,
+  params,
+}: {
+  tickers: string[];
+  params: { risk_aversion?: number; cost_bps?: number; algorithm?: Algorithm };
+}) {
   return (
     <>
+      <AlgoChip algorithm={params.algorithm ?? 'reinforce'} />
       {tickers.map((t, i) => (
         <span key={t} className="chip" style={{ background: `color-mix(in srgb, ${SERIES[i % SERIES.length]} 14%, transparent)`, color: SERIES[i % SERIES.length] }}>
           {t}
@@ -120,7 +148,7 @@ export function TickerChips({ tickers, params }: { tickers: string[]; params: { 
 
 export function PortfolioLab({ navigate }: { navigate: (v: View) => void }) {
   const live = useLiveRun<PortfolioResult>('portfolio');
-  const [params, setParams] = useState<MarketParams>({ tickers: PRESETS['Index ETFs'], risk_aversion: 1, episodes: 800, cost_bps: 10 });
+  const [params, setParams] = useState<MarketParams>({ algorithm: 'ppo', tickers: PRESETS['Index ETFs'], risk_aversion: 1, episodes: 800, cost_bps: 10 });
   const { busy, run } = useAction();
   const active = live.active;
 
@@ -167,6 +195,7 @@ export function PortfolioLab({ navigate }: { navigate: (v: View) => void }) {
         activeId={live.activeId}
         onSelect={live.setActiveId}
         columns={[
+          { label: 'Algorithm', render: (r) => <AlgoChip algorithm={r.params.algorithm ?? 'reinforce'} /> },
           { label: 'Universe', render: (r) => r.tickers.join(', ') },
           { label: 'Return', right: true, render: (r) => (r.result?.metrics ? signedPct(r.result.metrics.policy.total_return) : '—') },
           { label: 'Sharpe', right: true, render: (r) => (r.result?.metrics ? r.result.metrics.policy.sharpe.toFixed(2) : '—') },
