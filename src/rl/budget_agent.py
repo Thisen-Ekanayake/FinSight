@@ -126,9 +126,17 @@ def profile_from_ledger(
             # Untagged spending is treated as a need: conservative.
             names |= {cat for m in by_month.values() for cat in m if cat not in kinds}
         for name in names:
-            spent = [by_month.get(m, {}).get(name, 0.0) for m in recent] if recent else []
+            # Averaged over the months the category was actually used: a bill
+            # logged once in four months is a monthly bill someone forgot to
+            # log, not a quarter-sized one.
+            spent = [v for v in (by_month.get(m, {}).get(name, 0.0) for m in recent) if v > 0]
             limit = next((c["monthly_limit"] for c in categories if c["name"] == name), 0.0)
-            mean = float(np.mean(spent)) if spent and any(spent) else float(limit)
+            mean = float(np.mean(spent)) if spent else float(limit)
+            if kind == "need":
+                # A need's limit is the person's own statement of what the bill
+                # costs. Sparse logging must not talk the plan into cutting it:
+                # writing a smaller rent limit does not make rent cheaper.
+                mean = max(mean, float(limit))
             if mean > 0:
                 out[name] = mean
         return out
@@ -214,15 +222,25 @@ def _base_context(p: HouseholdProfile) -> _Context:
     )
 
 
-def _perturb(base: _Context, rng: np.random.Generator) -> _Context:
+def _perturb(base: _Context, rng: np.random.Generator, spread: float = 1.0) -> _Context:
+    """
+    A nearby household. ``spread`` = 1 is the widest; it anneals toward 0 so
+    practice starts broad (to generalise) and ends on this household's own
+    situation (so the estimates that decide the recommendation are sharp).
+    """
+
+    def jitter(lo: float, hi: float) -> float:
+        return 1.0 + spread * (rng.uniform(lo, hi) - 1.0)
+
+    buffer = base.buffer_months * jitter(0.0, 2.0) if base.buffer_months else spread * rng.uniform(0.0, 4.0)
     return _Context(
-        income_mu=base.income_mu * rng.uniform(0.75, 1.25),
-        income_sd=base.income_sd * rng.uniform(0.5, 2.0),
-        needs_mu=base.needs_mu * rng.uniform(0.8, 1.2),
-        needs_sd=base.needs_sd * rng.uniform(0.5, 2.0),
-        wants_mu=base.wants_mu * rng.uniform(0.6, 1.4),
-        goal_required=base.goal_required * rng.uniform(0.4, 1.6),
-        buffer_months=base.buffer_months * rng.uniform(0.0, 2.0) if base.buffer_months else rng.uniform(0.0, 4.0),
+        income_mu=base.income_mu * jitter(0.75, 1.25),
+        income_sd=base.income_sd * jitter(0.5, 2.0),
+        needs_mu=base.needs_mu * jitter(0.8, 1.2),
+        needs_sd=base.needs_sd * jitter(0.5, 2.0),
+        wants_mu=base.wants_mu * jitter(0.6, 1.4),
+        goal_required=base.goal_required * jitter(0.4, 1.6),
+        buffer_months=buffer,
     )
 
 
@@ -388,7 +406,7 @@ def train_budget_agent(
     window: list[float] = []
     rule_window: list[float] = []
     for t in range(1, cfg.rounds + 1):
-        ctx = _perturb(base, rng)
+        ctx = _perturb(base, rng, spread=max(0.1, 1.0 - t / (0.7 * cfg.rounds)))
         x = ctx.features()
         arm = agent.choose(x, rng)
         outcome = simulate_month(ctx, RATES[arm], rng)

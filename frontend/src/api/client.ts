@@ -26,6 +26,11 @@
 
 import type {
   AgentInfo,
+  BudgetResult,
+  LabelCounts,
+  PreferenceRow,
+  RankedAlert,
+  TimingResult,
   Alert,
   BrokerAccount,
   BrokerStatus,
@@ -439,6 +444,10 @@ export function financeSummary(month?: string): Promise<MonthSummary> {
   return request('GET', '/finance/summary', { params: { month } });
 }
 
+export function listCategories(): Promise<BudgetCategory[]> {
+  return request('GET', '/finance/categories');
+}
+
 export function saveCategory(name: string, monthlyLimit: number, kind: CategoryKind): Promise<BudgetCategory> {
   return request('PUT', '/finance/categories', { body: { name, monthly_limit: monthlyLimit, kind } });
 }
@@ -486,12 +495,41 @@ export function startRun(body: {
   return request('POST', '/rl/runs', { body });
 }
 
-export function listPolicyRuns(limit = 20): Promise<PolicyRun[]> {
-  return request('GET', '/rl/runs', { params: { limit } });
+export function listPolicyRuns<R = PolicyRun['result']>(limit = 20, agent?: string): Promise<PolicyRun<NonNullable<R>>[]> {
+  return request('GET', '/rl/runs', { params: { limit, agent } });
 }
 
-export function getPolicyRun(runId: string): Promise<PolicyRun> {
+export function getPolicyRun<R = PolicyRun['result']>(runId: string): Promise<PolicyRun<NonNullable<R>>> {
   return request('GET', `/rl/runs/${encodeURIComponent(runId)}`);
+}
+
+export function startTimingRun(body: {
+  tickers: string[];
+  risk_aversion: number;
+  episodes: number;
+  cost_bps: number;
+}): Promise<PolicyRun<TimingResult>> {
+  return request('POST', '/rl/timing/runs', { body });
+}
+
+export function startBudgetRun(rounds = 3000): Promise<PolicyRun<BudgetResult>> {
+  return request('POST', '/rl/budget/runs', { body: { rounds } });
+}
+
+export function applyBudgetPlan(runId: string): Promise<BudgetCategory[]> {
+  return request('POST', '/rl/budget/apply', { body: { run_id: runId } });
+}
+
+export function rankedAlerts(explore = false, limit = 50): Promise<{ alerts: RankedAlert[]; labels: LabelCounts }> {
+  return request('GET', '/rl/alerts/ranked', { params: { explore, limit } });
+}
+
+export function alertPreferences(): Promise<{ preferences: Record<string, PreferenceRow[]>; labels: LabelCounts }> {
+  return request('GET', '/rl/alerts/preferences');
+}
+
+export function alertFeedback(alertId: string, useful: boolean | null): Promise<{ alert_id: string; useful: boolean | null }> {
+  return request('POST', `/rl/alerts/${encodeURIComponent(alertId)}/feedback`, { body: { useful } });
 }
 
 // ── Paper broker ────────────────────────────────────────

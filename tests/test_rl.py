@@ -162,6 +162,11 @@ class TestBudgetProfile:
         assert p.needs_mu == 1600 and p.wants_mu == 250
         assert p.months_of_history == 3
 
+    def test_needs_never_drop_below_the_stated_limit(self):
+        sparse = [{"occurred_on": "2026-10-03", "amount": 30, "direction": "expense", "category": "Food"}]
+        p = profile_from_ledger(sparse, _CATS, [], today=date(2026, 11, 3))
+        assert p.needs_by_category["Food"] == 400  # logged 30 once; the stated bill is 400
+
     def test_assumes_income_when_none_is_recorded(self):
         p = profile_from_ledger([], _CATS, [], today=date(2026, 11, 3))
         assert p.assumed_income and p.income_mu > 0

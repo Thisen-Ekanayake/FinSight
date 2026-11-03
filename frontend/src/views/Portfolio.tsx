@@ -23,7 +23,7 @@ type Choice = 'approve' | 'reject' | 'skip';
 export function Portfolio({ navigate }: { navigate: (v: View) => void }) {
   const status = useResource(() => api.brokerStatus(), [], { pollMs: 30_000 });
   const proposals = useResource(() => api.listProposals(), []);
-  const runs = useResource(() => api.listPolicyRuns(20), []);
+  const runs = useResource(() => api.listPolicyRuns(20, 'portfolio'), []);
   const s = status.data;
 
   return (
