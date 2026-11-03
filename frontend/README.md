@@ -18,11 +18,14 @@ API is not up), `make web-build` (type-check + bundle), `make web-check`
 ```
 src/
   api/         types.ts mirrors src/api/schemas.py; client.ts mirrors src/ui/client.py
-  views/       one file per destination — Desk, Ask, Findings, Watchlist, System
-  components/  Header, AmbientField, and the primitives every view repeats
+  views/       one file per destination — Overview, Budget, Portfolio, Agents,
+               Desk, Ask, Findings, Watchlist, System
+  components/  Sidebar, AmbientField, primitives.tsx (research views) and ui.tsx
+               (cards, animated progress bars/rings, sliders, toasts)
   hooks/       useResource (fetch + poll), useTheme, useRoute
   lib/         format.ts (severity markers, elapsed time), answer.tsx (prose + citations)
-  viz/         ambient.ts is the three.js field; beacons.ts is its dependency-free geometry
+  viz/         ambient.ts is the three.js field; finance.tsx is the interactive
+               trend chart (hover crosshair) and allocation donut — plain SVG
   styles/      tokens.css — the design system, and the source of truth for the look
 ```
 

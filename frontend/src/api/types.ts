@@ -351,3 +351,156 @@ export interface QuotaExceeded {
   remaining: number;
   contact_url: string;
 }
+
+// ═══════════════════════════════════════════════════════
+// Finance management — mirrors src/api/finance_routes.py
+// ═══════════════════════════════════════════════════════
+
+export type CategoryKind = 'need' | 'want' | 'savings';
+
+export interface BudgetCategory {
+  id: number | null;
+  name: string;
+  monthly_limit: number;
+  kind: CategoryKind;
+}
+
+export interface CategorySpend extends BudgetCategory {
+  spent: number;
+}
+
+export interface LedgerEntry {
+  id: number;
+  occurred_on: string;
+  amount: number;
+  direction: 'income' | 'expense';
+  category: string;
+  note: string;
+}
+
+export interface SavingsGoal {
+  id: number;
+  name: string;
+  target: number;
+  saved: number;
+  deadline: string | null;
+}
+
+export interface MonthSummary {
+  month: string;
+  income: number;
+  expenses: number;
+  net: number;
+  savings_rate: number;
+  budget_total: number;
+  categories: CategorySpend[];
+  daily: { spent: number[]; pace: number[] };
+  goals: SavingsGoal[];
+  goals_saved: number;
+  goals_target: number;
+  disclaimer: string;
+}
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  status: 'available' | 'planned';
+  summary: string;
+  method: string;
+}
+
+export interface StrategyMetrics {
+  total_return: number;
+  annual_return: number;
+  annual_volatility: number;
+  sharpe: number;
+  max_drawdown: number;
+}
+
+export interface PortfolioResult {
+  tickers: string[];
+  target_weights: Record<string, number>;
+  average_weights: Record<string, number>;
+  learning_curve: number[];
+  train_span: { start: string; end: string; bars: number };
+  test_span: { start: string; end: string; bars: number };
+  backtest: { dates: string[]; policy: number[]; equal_weight: number[]; buy_hold: number[] };
+  metrics: { policy: StrategyMetrics; equal_weight: StrategyMetrics; buy_hold: StrategyMetrics };
+  config: { episodes: number; risk_aversion: number; cost_bps: number; window: number; assets: number };
+}
+
+export type RunStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED';
+
+export interface PolicyRun {
+  run_id: string;
+  agent: string;
+  tickers: string[];
+  params: { risk_aversion?: number; episodes?: number; cost_bps?: number };
+  status: RunStatus;
+  stage: string;
+  episodes_done: number;
+  episodes_total: number;
+  progress: number;
+  curve: number[];
+  result: PortfolioResult | null;
+  error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BrokerAccount {
+  account_number?: string;
+  status: string;
+  currency?: string;
+  equity: number;
+  cash: number;
+  buying_power?: number;
+  last_equity?: number;
+  trading_blocked?: boolean;
+}
+
+export interface BrokerPosition {
+  symbol: string;
+  qty: number;
+  market_value: number;
+  avg_entry_price: number;
+  current_price: number;
+  unrealized_pl: number;
+  unrealized_plpc: number;
+}
+
+export interface BrokerStatus {
+  linked: boolean;
+  encryption_available: boolean;
+  paused: boolean;
+  key_hint: string;
+  limits: {
+    max_order_notional: number;
+    max_position_pct: number;
+    max_orders_per_day: number;
+    min_order_notional: number;
+    kill_switch: boolean;
+  };
+  account: BrokerAccount | null;
+  positions: BrokerPosition[];
+  error: string | null;
+  disclaimer: string;
+}
+
+export type ProposalStatus = 'PENDING' | 'SUBMITTING' | 'SUBMITTED' | 'FAILED' | 'REJECTED' | 'SUPERSEDED';
+
+export interface OrderProposal {
+  proposal_id: string;
+  run_id: string;
+  symbol: string;
+  side: 'buy' | 'sell';
+  notional: number;
+  current_weight: number;
+  target_weight: number;
+  reason: string;
+  status: ProposalStatus;
+  broker_order_id: string;
+  error: string;
+  created_at: string | null;
+  decided_at: string | null;
+}

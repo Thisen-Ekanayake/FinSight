@@ -67,8 +67,8 @@ export function useTheme(): {
   // one place the token values have to be repeated in JS. These are the same
   // hexes tokens.css uses for --color-accent and --alert in each theme.
   const vizColors: VizColors = dark
-    ? { dim: '#2b333a', accent: '#86aad0', alert: '#d9a24e' }
-    : { dim: '#d5d9dd', accent: '#5980a6', alert: '#b07a24' };
+    ? { dim: '#1e2745', accent: '#818cf8', alert: '#f59e0b' }
+    : { dim: '#dfe3ee', accent: '#4f46e5', alert: '#b45309' };
 
   return { theme, setTheme, dark, vizColors };
 }

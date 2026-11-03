@@ -6,7 +6,7 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED.svg?logo=docker&logoColor=white)](./docker-compose.yml)
 
-**Multi-agent financial intelligence platform** — grounded, source-cited research on demand, plus autonomous portfolio surveillance.
+**Finance management platform with reinforcement-learning agents** — budgets, savings goals and a paper-traded portfolio, plus grounded, source-cited research and autonomous surveillance.
 
 Built with **LangGraph** (orchestration), **LangChain** (tooling), **LangSmith** (tracing + evaluation), **Qdrant** (vector search), **Google Gemini** (reasoning), and **React + three.js** (dashboard). Fully containerized; every financial data source is free.
 
@@ -164,6 +164,25 @@ make test           # unit tests, no network, no quota
 
 ---
 
+## Finance management + RL agents
+
+| Piece | What it does |
+|---|---|
+| **Budget** | Monthly categories (need / want / savings), a ledger, burn-down against even pace, savings goals with progress rings |
+| **Agents** | A portfolio-allocation agent (`src/rl/`) trained with policy gradient on 5 years of daily prices, then backtested on a held-out tail it never saw, against equal-weight and buy-and-hold |
+| **Portfolio** | Link an **Alpaca paper** account (simulated money). The agent's target weights become order *proposals*; nothing is sent until a person approves each one |
+
+**Safety by construction:** the Alpaca host is a hard-coded paper constant and live keys (`AK…`) are refused;
+keys are Fernet-encrypted per account (`BROKER_ENCRYPTION_KEY`); every order is clipped to per-order and
+per-position caps, counted against a daily limit, and blocked by the per-account pause or the global
+`TRADING_KILL_SWITCH`; `client_order_id` makes a retried submit idempotent. See `.env.example`.
+
+**What the agent is and isn't.** The reward is log growth *relative to an equal-weight basket*, minus
+turnover cost and a variance penalty (the risk slider). On real data it typically does **not** beat a
+plain 1/N portfolio out of sample — the UI shows that comparison on every run rather than hiding it.
+It is an educational tool, not financial advice. The budget planner, trade-timing and alert-prioritiser
+agents are listed in the UI as planned.
+
 ## Dashboard
 
 A React + three.js frontend in [`frontend/`](frontend/) talks to the API over
@@ -171,6 +190,10 @@ plain HTTP and holds no state of its own.
 
 | View | Answers |
 |---|---|
+| **Overview** | This month's money, goals, the latest agent, and anything waiting on you |
+| **Budget** | Where the month went, against the plan — every bar fills as you spend |
+| **Portfolio** | What the paper account holds, and which agent orders you approve |
+| **Agents** | Train an RL agent, watch it learn live, judge it out of sample |
 | **Desk** | Is there anything that needs a decision — and lets you make it, in place |
 | **Ask** | A question, streamed node by node, with every number traceable |
 | **Findings** | What was reported, and what was filtered out underneath it |

@@ -87,6 +87,13 @@ reads in order to sign in.
 * `POST /monitor/cycles/{cycle_id}/resume` — decide a paused cycle's HIGH alerts
 * `GET /monitor/decisions` — every dedup decision, with the score behind it
 * `GET /admin/budgets` — daily API usage
+* `GET /finance/summary` — budgets, spend, savings goals for a month
+* `POST /rl/runs` — train the portfolio-allocation agent; poll `GET /rl/runs/{id}`
+* `POST /broker/proposals` — turn a run into order proposals for an Alpaca **paper** account
+* `POST /broker/proposals/decide` — approve (submit) or reject them
+
+Finance features are an educational tool, not financial advice. Orders only
+ever reach a paper (simulated-money) account, and only after a person approves.
 """
 
 
@@ -144,6 +151,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     init_db()
 
+    # A training thread does not survive a restart; its run must not look alive.
+    from src.finance.repository import fail_stale_runs
+
+    stale = fail_stale_runs()
+    if stale:
+        logger.info("Marked %d interrupted training run(s) as failed", stale)
+
     client, detail = _connect_qdrant()
 
     # The collections have to exist before anything reads them, and the monitor
@@ -196,6 +210,7 @@ def create_app() -> FastAPI:
     from src.api.admin_routes import router as admin_router
     from src.api.auth import require_unlimited_user, require_user
     from src.api.auth_routes import router as auth_router
+    from src.api.finance_routes import broker_router, finance_router, rl_router
     from src.api.monitor_routes import router as monitor_router
     from src.api.research_routes import router as research_router
     from src.api.watchlist_routes import router as watchlist_router
@@ -265,6 +280,13 @@ def create_app() -> FastAPI:
     app.include_router(research_router, dependencies=guarded)
     app.include_router(watchlist_router, dependencies=guarded)
     app.include_router(monitor_router, dependencies=reserved)
+
+    # Finance management. Guarded, not reserved: these are each account's own
+    # records, scoped by subject inside every route. Training is CPU, not LLM
+    # spend, and is capped per account and per server in src/rl/service.py.
+    app.include_router(finance_router, dependencies=guarded)
+    app.include_router(rl_router, dependencies=guarded)
+    app.include_router(broker_router, dependencies=guarded)
 
     # admin_router cannot take a blanket dependency: GET /health lives in it and
     # has to stay open. docker-compose.yml probes it to decide service_healthy,
