@@ -91,6 +91,9 @@ reads in order to sign in.
 * `POST /rl/runs` — train the portfolio-allocation agent; poll `GET /rl/runs/{id}`
 * `POST /broker/proposals` — turn a run into order proposals for an Alpaca **paper** account
 * `POST /broker/proposals/decide` — approve (submit) or reject them
+* `POST /rl/budget/runs` — train the budget planner on your ledger; `POST /rl/budget/apply` writes its limits
+* `POST /rl/timing/runs` — train the long/flat timing agent (signals and backtests only)
+* `GET /rl/alerts/ranked` — monitor alerts ranked by what you have found useful
 
 Finance features are an educational tool, not financial advice. Orders only
 ever reach a paper (simulated-money) account, and only after a person approves.
@@ -210,7 +213,7 @@ def create_app() -> FastAPI:
     from src.api.admin_routes import router as admin_router
     from src.api.auth import require_unlimited_user, require_user
     from src.api.auth_routes import router as auth_router
-    from src.api.finance_routes import broker_router, finance_router, rl_router
+    from src.api.finance_routes import alerts_router, broker_router, finance_router, rl_router
     from src.api.monitor_routes import router as monitor_router
     from src.api.research_routes import router as research_router
     from src.api.watchlist_routes import router as watchlist_router
@@ -287,6 +290,8 @@ def create_app() -> FastAPI:
     app.include_router(finance_router, dependencies=guarded)
     app.include_router(rl_router, dependencies=guarded)
     app.include_router(broker_router, dependencies=guarded)
+    # The prioritiser ranks the monitor's alerts, so it takes the monitor's tier.
+    app.include_router(alerts_router, dependencies=reserved)
 
     # admin_router cannot take a blanket dependency: GET /health lives in it and
     # has to stay open. docker-compose.yml probes it to decide service_healthy,

@@ -116,8 +116,8 @@ def status(*, subject: str) -> dict[str, Any]:
 
 def propose(*, subject: str, run_id: str) -> list[dict[str, Any]]:
     run = repo.get_run(subject=subject, run_id=run_id)
-    if run is None:
-        raise ServiceError("Training run not found.", 404)
+    if run is None or run["agent"] != "portfolio":
+        raise ServiceError("Portfolio training run not found.", 404)
     if run["status"] != "DONE" or not run["result"]:
         raise ServiceError("That run has not finished training.", 409)
 

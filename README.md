@@ -169,7 +169,7 @@ make test           # unit tests, no network, no quota
 | Piece | What it does |
 |---|---|
 | **Budget** | Monthly categories (need / want / savings), a ledger, burn-down against even pace, savings goals with progress rings |
-| **Agents** | A portfolio-allocation agent (`src/rl/`) trained with policy gradient on 5 years of daily prices, then backtested on a held-out tail it never saw, against equal-weight and buy-and-hold |
+| **Agents** | Four RL agents, one lab each (`src/rl/`) — see the table below |
 | **Portfolio** | Link an **Alpaca paper** account (simulated money). The agent's target weights become order *proposals*; nothing is sent until a person approves each one |
 
 **Safety by construction:** the Alpaca host is a hard-coded paper constant and live keys (`AK…`) are refused;
@@ -177,11 +177,21 @@ keys are Fernet-encrypted per account (`BROKER_ENCRYPTION_KEY`); every order is 
 per-position caps, counted against a daily limit, and blocked by the per-account pause or the global
 `TRADING_KILL_SWITCH`; `client_order_id` makes a retried submit idempotent. See `.env.example`.
 
-**What the agent is and isn't.** The reward is log growth *relative to an equal-weight basket*, minus
-turnover cost and a variance penalty (the risk slider). On real data it typically does **not** beat a
-plain 1/N portfolio out of sample — the UI shows that comparison on every run rather than hiding it.
-It is an educational tool, not financial advice. The budget planner, trade-timing and alert-prioritiser
-agents are listed in the UI as planned.
+### The four agents
+
+| Agent | Learns | Method | Acts by |
+|---|---|---|---|
+| **Portfolio allocator** | Target weights across 2–8 tickers + cash | REINFORCE over a linear-softmax policy; reward is log growth *relative to an equal-weight basket*, minus turnover cost and a variance penalty | Paper-order **proposals** you approve one by one |
+| **Budget & savings planner** | What share of income to save first | Linear Thompson-sampling contextual bandit, trained in a household simulator fitted to your own ledger (income, fixed needs, flexible wants, goal deadlines, emergency buffer) | Category limits + per-goal contributions you can **apply** (limits only — no money moves) |
+| **Trade timing** | When each ticker is worth holding vs sitting in cash | Shared logistic long/flat policy, weekly decisions, reward relative to buy-and-hold | **Signals and backtests only** — it has no path to the broker |
+| **Alert prioritiser** | Which monitor alerts matter to you | Beta-Bernoulli Thompson sampling over alert type, severity and ticker, from HIGH-alert approvals (implicit) and 👍/👎 (explicit) | **Reorders** alerts — never hides or auto-decides one |
+
+**What they are and aren't.** Every market agent is judged on a held-out tail it never trained on,
+next to a plain benchmark. On real daily data the allocator usually does **not** beat a 1/N portfolio,
+and the timing agent usually stays invested — timing rarely beats holding once costs are counted. The
+UI shows both comparisons on every run rather than hiding them. The budget planner is only as good as
+its simulator; each run shows the simulator's own score for every savings rate next to the agent's
+choice. This is an educational tool, not financial advice.
 
 ## Dashboard
 
@@ -193,7 +203,7 @@ plain HTTP and holds no state of its own.
 | **Overview** | This month's money, goals, the latest agent, and anything waiting on you |
 | **Budget** | Where the month went, against the plan — every bar fills as you spend |
 | **Portfolio** | What the paper account holds, and which agent orders you approve |
-| **Agents** | Train an RL agent, watch it learn live, judge it out of sample |
+| **Agents** | Four RL labs: train, watch it learn live, judge it out of sample, act on it |
 | **Desk** | Is there anything that needs a decision — and lets you make it, in place |
 | **Ask** | A question, streamed node by node, with every number traceable |
 | **Findings** | What was reported, and what was filtered out underneath it |

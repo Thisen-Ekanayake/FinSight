@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 from src.api.auth import CurrentIdentity
 from src.broker import service as broker
 from src.finance import repository as repo
+from src.rl import alert_service
 from src.rl import service as rl
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -37,6 +38,9 @@ DISCLAIMER = (
 finance_router = APIRouter(prefix="/finance", tags=["finance"])
 rl_router = APIRouter(prefix="/rl", tags=["agents"])
 broker_router = APIRouter(prefix="/broker", tags=["broker"])
+# Alerts are the monitor's, and the monitor is the unlimited tier's — this
+# router is mounted with the same `reserved` guard in src/api/main.py.
+alerts_router = APIRouter(prefix="/rl/alerts", tags=["agents"])
 
 
 def _this_month() -> str:
@@ -99,6 +103,19 @@ class TrainIn(BaseModel):
             if not _TICKER.match(ticker.strip()):
                 raise ValueError(f"{ticker!r} is not a ticker symbol")
         return value
+
+
+class BudgetTrainIn(BaseModel):
+    rounds: int = Field(default=3000, ge=500, le=10_000)
+
+
+class ApplyIn(BaseModel):
+    run_id: str
+
+
+class FeedbackIn(BaseModel):
+    # null clears the feedback.
+    useful: bool | None
 
 
 class LinkIn(BaseModel):
@@ -221,9 +238,58 @@ async def post_run(body: TrainIn, identity: CurrentIdentity) -> dict[str, Any]:
     return run
 
 
+@rl_router.post("/timing/runs", status_code=202, summary="Start training the trade-timing agent (signals only)")
+async def post_timing_run(body: TrainIn, identity: CurrentIdentity) -> dict[str, Any]:
+    try:
+        run_id = rl.start_timing_run(
+            subject=identity.subject,
+            tickers=body.tickers,
+            risk_aversion=body.risk_aversion,
+            episodes=body.episodes,
+            cost_bps=body.cost_bps,
+        )
+    except rl.TrainingRefused as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    run = repo.get_run(subject=identity.subject, run_id=run_id)
+    assert run is not None
+    return run
+
+
+@rl_router.post("/budget/runs", status_code=202, summary="Train the budget planner on your own ledger")
+async def post_budget_run(body: BudgetTrainIn, identity: CurrentIdentity) -> dict[str, Any]:
+    try:
+        run_id = rl.start_budget_run(subject=identity.subject, rounds=body.rounds)
+    except rl.TrainingRefused as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    run = repo.get_run(subject=identity.subject, run_id=run_id)
+    assert run is not None
+    return run
+
+
+@rl_router.post("/budget/apply", summary="Apply a budget plan's category limits")
+async def post_budget_apply(body: ApplyIn, identity: CurrentIdentity) -> list[dict[str, Any]]:
+    """
+    Write the plan's recommended monthly limits onto your categories.
+
+    Only limits change — no money moves, and categories the plan does not
+    mention are left alone. Re-applying an older plan simply rewrites them.
+    """
+    run = repo.get_run(subject=identity.subject, run_id=body.run_id)
+    if run is None or run["agent"] != "budget":
+        raise HTTPException(404, "Budget plan not found")
+    if run["status"] != "DONE" or not run["result"]:
+        raise HTTPException(409, "That plan has not finished training")
+    kinds = {c["name"]: c["kind"] for c in repo.list_categories(subject=identity.subject)}
+    for name, limit in run["result"]["plan"]["category_limits"].items():
+        if name in kinds:
+            repo.upsert_category(subject=identity.subject, name=name, monthly_limit=float(limit), kind=kinds[name])
+    return repo.list_categories(subject=identity.subject)
+
+
 @rl_router.get("/runs")
-async def get_runs(identity: CurrentIdentity, limit: int = 20) -> list[dict[str, Any]]:
-    return repo.list_runs(subject=identity.subject, limit=max(1, min(limit, 100)))
+async def get_runs(identity: CurrentIdentity, limit: int = 20, agent: str | None = None) -> list[dict[str, Any]]:
+    runs = repo.list_runs(subject=identity.subject, limit=max(1, min(limit, 100)), agent=agent)
+    return runs
 
 
 @rl_router.get("/runs/{run_id}", summary="One run — poll this for live progress")
@@ -289,3 +355,29 @@ async def post_decide(body: DecideIn, identity: CurrentIdentity) -> list[dict[st
         return broker.decide(subject=identity.subject, approve=body.approve, reject=body.reject)
     except broker.ServiceError as exc:
         raise _translate(exc) from exc
+
+
+# ── /rl/alerts ──────────────────────────────────────────
+
+
+@alerts_router.get("/ranked", summary="Recent alerts, ranked by learned usefulness")
+async def get_ranked(identity: CurrentIdentity, limit: int = 50, explore: bool = False) -> dict[str, Any]:
+    return alert_service.ranked_alerts(subject=identity.subject, limit=max(1, min(limit, 200)), explore=explore)
+
+
+@alerts_router.get("/preferences", summary="What the prioritiser has learned")
+async def get_preferences(identity: CurrentIdentity) -> dict[str, Any]:
+    return alert_service.learned_preferences(subject=identity.subject)
+
+
+@alerts_router.post("/{alert_id}/feedback", summary="Mark an alert useful / not useful (null clears)")
+async def post_feedback(alert_id: str, body: FeedbackIn, identity: CurrentIdentity) -> dict[str, Any]:
+    from src.persistence.repository import get_alert
+
+    if get_alert(alert_id) is None:
+        raise HTTPException(404, "Alert not found")
+    if body.useful is None:
+        repo.delete_alert_feedback(subject=identity.subject, alert_id=alert_id)
+    else:
+        repo.record_alert_feedback(subject=identity.subject, alert_id=alert_id, useful=body.useful)
+    return {"alert_id": alert_id, "useful": body.useful}

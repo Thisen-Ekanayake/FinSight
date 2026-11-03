@@ -21,7 +21,7 @@ function greeting(): string {
 export function Overview({ navigate, pendingCount, email }: { navigate: (v: View) => void; pendingCount: number; email?: string }) {
   const month = thisMonth();
   const summary = useResource(() => api.financeSummary(month), []);
-  const runs = useResource(() => api.listPolicyRuns(5), []);
+  const runs = useResource(() => api.listPolicyRuns(5, 'portfolio'), []);
   const broker = useResource(() => api.brokerStatus(), []);
   const proposals = useResource(() => api.listProposals('PENDING'), []);
 

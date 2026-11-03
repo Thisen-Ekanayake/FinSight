@@ -431,18 +431,18 @@ export interface PortfolioResult {
 
 export type RunStatus = 'QUEUED' | 'RUNNING' | 'DONE' | 'FAILED';
 
-export interface PolicyRun {
+export interface PolicyRun<R = PortfolioResult> {
   run_id: string;
   agent: string;
   tickers: string[];
-  params: { risk_aversion?: number; episodes?: number; cost_bps?: number };
+  params: { risk_aversion?: number; episodes?: number; cost_bps?: number; rounds?: number };
   status: RunStatus;
   stage: string;
   episodes_done: number;
   episodes_total: number;
   progress: number;
   curve: number[];
-  result: PortfolioResult | null;
+  result: R | null;
   error: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -503,4 +503,108 @@ export interface OrderProposal {
   error: string;
   created_at: string | null;
   decided_at: string | null;
+}
+
+// ── Budget planner ──────────────────────────────────────
+
+export interface BudgetGoalPlan {
+  goal_id: number;
+  name: string;
+  monthly: number;
+  remaining: number;
+  months_to_complete: number | null;
+  deadline_months: number | null;
+  on_track: boolean;
+}
+
+export interface BudgetResult {
+  profile: {
+    income: number;
+    income_volatility: number;
+    needs: number;
+    wants: number;
+    goal_required: number;
+    emergency_buffer_months: number;
+    months_of_history: number;
+    assumed_income: boolean;
+  };
+  rates: number[];
+  learned_value: number[];
+  simulated_value: number[];
+  recommended_rate: number;
+  best_simulated_rate: number;
+  rule_rate: number;
+  value_vs_rule: number;
+  learning_curve: number[];
+  rule_curve: number[];
+  plan: {
+    savings_rate: number;
+    monthly_savings: number;
+    unallocated_savings: number;
+    needs_total: number;
+    wants_budget: number;
+    unassigned: number;
+    category_limits: Record<string, number>;
+    goals: BudgetGoalPlan[];
+  };
+}
+
+// ── Trade timing ────────────────────────────────────────
+
+export interface TimingSignal {
+  ticker: string;
+  signal: 'LONG' | 'FLAT';
+  confidence: number;
+  prob_long: number;
+  time_in_market: number;
+  switches: number;
+  metrics: { agent: StrategyMetrics; buy_hold: StrategyMetrics };
+  equity: { agent: number[]; buy_hold: number[]; position: number[] };
+}
+
+export interface TimingResult {
+  tickers: string[];
+  signals: TimingSignal[];
+  dates: string[];
+  learning_curve: number[];
+  feature_weights: Record<string, number>;
+  train_span: { start: string; end: string; bars: number };
+  test_span: { start: string; end: string; bars: number };
+}
+
+// ── Alert prioritiser ───────────────────────────────────
+
+export interface AlertPriority {
+  priority: number;
+  sampled: number;
+  uncertainty: number;
+  evidence: { feature: string; value: string; mean: number; n: number }[];
+}
+
+export interface RankedAlert {
+  alert_id: string;
+  ticker: string;
+  alert_type: string;
+  severity: string;
+  status: string;
+  headline: string;
+  fired_at: string;
+  occurrence_count: number;
+  feedback: boolean | null;
+  priority: AlertPriority;
+}
+
+export interface LabelCounts {
+  total: number;
+  explicit: number;
+  from_approvals: number;
+}
+
+export interface PreferenceRow {
+  value: string;
+  mean: number;
+  low: number;
+  high: number;
+  useful: number;
+  not_useful: number;
 }

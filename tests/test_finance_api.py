@@ -102,9 +102,9 @@ def api(tmp_path):
     FakeBroker.fail_with = None
     try:
         app = main_module.create_app()
-        who = {"subject": "alice"}
+        who: dict[str, Any] = {"subject": "alice", "unlimited": True}
         app.dependency_overrides[require_identity] = lambda: Identity(
-            subject=who["subject"], email=f"{who['subject']}@example.com", unlimited=False
+            subject=who["subject"], email=f"{who['subject']}@example.com", unlimited=who["unlimited"]
         )
         with TestClient(app) as client:
             client.who = who  # type: ignore[attr-defined]
@@ -180,10 +180,120 @@ class TestTraining:
         api.who["subject"] = "bob"
         assert api.get(f"/rl/runs/{run['run_id']}").status_code == 404
 
-    def test_agents_list_is_honest_about_what_trains(self, api):
+    def test_all_four_agents_are_available(self, api):
         agents = {a["id"]: a["status"] for a in api.get("/rl/agents").json()}
-        assert agents["portfolio"] == "available"
-        assert set(agents) == {"portfolio", "budget", "timing", "alerts"}
+        assert agents == {"portfolio": "available", "budget": "available", "timing": "available", "alerts": "available"}
+
+    def test_a_timing_run_produces_signals_and_cannot_be_proposed(self, api):
+        run = api.post("/rl/timing/runs", json={"tickers": ["AAA", "BBB"], "episodes": 80}).json()
+        body = api.get(f"/rl/runs/{run['run_id']}").json()
+        assert body["status"] == "DONE", body["error"]
+        assert body["agent"] == "timing"
+        assert {s["ticker"] for s in body["result"]["signals"]} == {"AAA", "BBB"}
+        assert all(s["signal"] in ("LONG", "FLAT") for s in body["result"]["signals"])
+        # Timing is signals only: it can never become broker orders.
+        api.post("/broker/link", json={"key_id": "PKTEST12345", "secret": "good-secret"})
+        assert api.post("/broker/proposals", json={"run_id": run["run_id"]}).status_code == 404
+
+    def test_runs_can_be_filtered_by_agent(self, api):
+        api.post("/rl/runs", json={"tickers": ["AAA", "BBB"], "episodes": 50})
+        api.post("/rl/timing/runs", json={"tickers": ["AAA", "BBB"], "episodes": 50})
+        assert {r["agent"] for r in api.get("/rl/runs", params={"agent": "timing"}).json()} == {"timing"}
+        assert len(api.get("/rl/runs").json()) == 2
+
+
+class TestBudgetPlanner:
+    def _ledger(self, api) -> None:
+        api.put("/finance/categories", json={"name": "Rent", "monthly_limit": 1200, "kind": "need"})
+        api.put("/finance/categories", json={"name": "Dining", "monthly_limit": 200, "kind": "want"})
+        api.put("/finance/categories", json={"name": "Investing", "monthly_limit": 100, "kind": "savings"})
+        for m in ("2026-09", "2026-10"):
+            api.post("/finance/entries", json={"occurred_on": f"{m}-01", "amount": 4000, "direction": "income"})
+            api.post(
+                "/finance/entries",
+                json={"occurred_on": f"{m}-02", "amount": 1200, "direction": "expense", "category": "Rent"},
+            )
+        api.post("/finance/goals", json={"name": "Emergency fund", "target": 6000, "saved": 1000})
+
+    def test_trains_on_the_ledger_and_applies_limits(self, api):
+        self._ledger(api)
+        run = api.post("/rl/budget/runs", json={"rounds": 500}).json()
+        body = api.get(f"/rl/runs/{run['run_id']}").json()
+        assert body["status"] == "DONE", body["error"]
+        result = body["result"]
+        assert result["profile"]["income"] == 4000 and result["profile"]["assumed_income"] is False
+        assert result["recommended_rate"] in result["rates"]
+        assert result["plan"]["goals"][0]["name"] == "Emergency fund"
+
+        cats = {c["name"]: c for c in api.post("/rl/budget/apply", json={"run_id": run["run_id"]}).json()}
+        assert cats["Rent"]["monthly_limit"] == result["plan"]["category_limits"]["Rent"]
+        assert cats["Rent"]["kind"] == "need"  # applying never changes a category's kind
+
+    def test_cannot_apply_someone_elses_plan(self, api):
+        self._ledger(api)
+        run = api.post("/rl/budget/runs", json={"rounds": 500}).json()
+        api.who["subject"] = "bob"
+        assert api.post("/rl/budget/apply", json={"run_id": run["run_id"]}).status_code == 404
+
+    def test_a_portfolio_run_is_not_a_budget_plan(self, api):
+        run = api.post("/rl/runs", json={"tickers": ["AAA", "BBB"], "episodes": 50}).json()
+        assert api.post("/rl/budget/apply", json={"run_id": run["run_id"]}).status_code == 404
+
+
+class TestAlertPrioritiser:
+    def _alerts(self) -> None:
+        from src.persistence.repository import record_alert
+
+        rows = [
+            ("a1", "AAPL", "PRICE_MOVE", "HIGH", "FIRED"),
+            ("a2", "AAPL", "PRICE_MOVE", "HIGH", "FIRED"),
+            ("a3", "TSLA", "NEWS_SENTIMENT", "HIGH", "REJECTED"),
+            ("a4", "TSLA", "NEWS_SENTIMENT", "HIGH", "REJECTED"),
+            ("n1", "TSLA", "NEWS_SENTIMENT", "MED", "FIRED"),
+            ("n2", "AAPL", "PRICE_MOVE", "MED", "FIRED"),
+        ]
+        for alert_id, ticker, kind, sev, status in rows:
+            record_alert(
+                {"alert_id": alert_id, "ticker": ticker, "alert_type": kind, "severity": sev, "status": status},
+                cycle_id="c1",
+            )
+
+    def test_learns_from_approval_decisions(self, api):
+        self._alerts()
+        body = api.get("/rl/alerts/ranked").json()
+        assert body["labels"]["from_approvals"] == 4
+        order = [a["alert_id"] for a in body["alerts"]]
+        # Among the two unlabelled MED alerts, the approved-kind one ranks higher.
+        assert order.index("n2") < order.index("n1")
+
+    def test_explicit_feedback_overrides_and_clears(self, api):
+        self._alerts()
+        for alert_id in ("a1", "a2"):
+            api.post(f"/rl/alerts/{alert_id}/feedback", json={"useful": False})
+        for alert_id in ("a3", "a4"):
+            api.post(f"/rl/alerts/{alert_id}/feedback", json={"useful": True})
+        body = api.get("/rl/alerts/ranked").json()
+        assert body["labels"]["explicit"] == 4 and body["labels"]["from_approvals"] == 0
+        order = [a["alert_id"] for a in body["alerts"]]
+        assert order.index("n1") < order.index("n2")
+        assert next(a for a in body["alerts"] if a["alert_id"] == "a1")["feedback"] is False
+
+        api.post("/rl/alerts/a1/feedback", json={"useful": None})
+        assert api.get("/rl/alerts/ranked").json()["labels"]["explicit"] == 3
+
+    def test_preferences_report_credible_bands(self, api):
+        self._alerts()
+        prefs = api.get("/rl/alerts/preferences").json()["preferences"]
+        price = next(p for p in prefs["alert_type"] if p["value"] == "PRICE_MOVE")
+        assert price["low"] <= price["mean"] <= price["high"]
+
+    def test_feedback_on_a_missing_alert_is_404(self, api):
+        assert api.post("/rl/alerts/nope/feedback", json={"useful": True}).status_code == 404
+
+    def test_free_tier_is_refused_alerts_but_keeps_finance(self, api):
+        api.who["unlimited"] = False
+        assert api.get("/rl/alerts/ranked").status_code == 403
+        assert api.get("/finance/summary").status_code == 200
 
 
 class TestBroker:
