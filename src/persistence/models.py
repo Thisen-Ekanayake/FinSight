@@ -7,7 +7,7 @@
 # Public API:
 #   Base, ResearchRun, ApiBudget, FreeQueryQuota
 #   WatchItem, MonitorCheckpoint, AlertRecord, MonitorCycle, DedupDecision
-#   BudgetCategory, LedgerEntry, SavingsGoal, PolicyRun, BrokerLink, OrderProposal
+#   BudgetCategory, LedgerEntry, SavingsGoal, PolicyRun, BrokerLink, OrderProposal, AlertFeedback
 #
 # ══ WHAT IS AND IS NOT STORED HERE ══
 #   ResearchRun is a SUMMARY, not the run. The full intermediate state —
@@ -523,3 +523,21 @@ class OrderProposal(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, index=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AlertFeedback(Base):
+    """
+    One person's 👍 / 👎 on one monitoring alert — the alert prioritiser's
+    explicit training signal (src/rl/alert_bandit.py). One row per
+    (subject, alert): giving feedback again overwrites it.
+    """
+
+    __tablename__ = "alert_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    alert_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    useful: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (UniqueConstraint("subject", "alert_id", name="uq_alert_feedback_subject_alert"),)

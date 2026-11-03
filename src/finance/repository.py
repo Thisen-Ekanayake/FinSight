@@ -21,6 +21,7 @@ from sqlalchemy import func, select, update
 
 from src.persistence.db import session_scope
 from src.persistence.models import (
+    AlertFeedback,
     BrokerLink,
     BudgetCategory,
     LedgerEntry,
@@ -279,19 +280,27 @@ def get_run(*, subject: str, run_id: str) -> dict[str, Any] | None:
         return _run(row) if row else None
 
 
-def list_runs(*, subject: str, limit: int = 20) -> list[dict[str, Any]]:
+def list_runs(*, subject: str, limit: int = 20, agent: str | None = None) -> list[dict[str, Any]]:
     with session_scope() as s:
-        rows = s.scalars(
-            select(PolicyRun).where(PolicyRun.subject == subject).order_by(PolicyRun.created_at.desc()).limit(limit)
-        )
+        query = select(PolicyRun).where(PolicyRun.subject == subject)
+        if agent:
+            query = query.where(PolicyRun.agent == agent)
+        rows = s.scalars(query.order_by(PolicyRun.created_at.desc()).limit(limit))
         out = []
         for row in rows:
             item = _run(row)
             # The list view needs headline numbers, not the full series.
             if item["result"]:
+                r = item["result"]
                 item["result"] = {
-                    "target_weights": item["result"].get("target_weights"),
-                    "metrics": item["result"].get("metrics"),
+                    "target_weights": r.get("target_weights"),
+                    "metrics": r.get("metrics"),
+                    "recommended_rate": r.get("recommended_rate"),
+                    "signals": [
+                        {k: sig[k] for k in ("ticker", "signal", "confidence", "metrics")}
+                        for sig in r.get("signals", [])
+                    ]
+                    or None,
                 }
             item["curve"] = item["curve"][-40:]
             out.append(item)
@@ -452,3 +461,35 @@ def count_submitted_today(*, subject: str) -> int:
             )
             or 0
         )
+
+
+# ── Alert feedback ──────────────────────────────────────
+
+
+def record_alert_feedback(*, subject: str, alert_id: str, useful: bool) -> None:
+    with session_scope() as s:
+        row = s.scalar(
+            select(AlertFeedback).where(AlertFeedback.subject == subject, AlertFeedback.alert_id == alert_id)
+        )
+        if row is None:
+            s.add(AlertFeedback(subject=subject, alert_id=alert_id, useful=useful))
+        else:
+            row.useful = useful
+            row.created_at = utcnow()
+
+
+def delete_alert_feedback(*, subject: str, alert_id: str) -> bool:
+    with session_scope() as s:
+        row = s.scalar(
+            select(AlertFeedback).where(AlertFeedback.subject == subject, AlertFeedback.alert_id == alert_id)
+        )
+        if row is None:
+            return False
+        s.delete(row)
+        return True
+
+
+def list_alert_feedback(*, subject: str) -> dict[str, bool]:
+    with session_scope() as s:
+        rows = s.scalars(select(AlertFeedback).where(AlertFeedback.subject == subject))
+        return {r.alert_id: r.useful for r in rows}
